@@ -1,16 +1,18 @@
-#include "gammamax/config.hpp"
-#include "gammamax/gamma_max.hpp"
-#include "gammamax/k_tails.hpp"
-#include "gammamax/json_io.hpp"
-#include "gammamax/ngram.hpp"
-#include "gammamax/pta.hpp"
-#include "gammamax/rsr.hpp"
-#include "gammamax/state_merge.hpp"
+#include "patchouli/config.hpp"
+#include "patchouli/patchouli.hpp"
+#include "patchouli/json_io.hpp"
+#include "patchouli/ngram.hpp"
+#include "patchouli/pta.hpp"
+#include "patchouli/rsr.hpp"
+#include "patchouli/state_merge.hpp"
+#ifdef NDEBUG
+#undef NDEBUG
+#endif
 #include <cassert>
 #include <iostream>
 #include <limits>
 
-using namespace gammamax;
+using namespace patchouli;
 class SetOracle final : public Oracle {
 public:
     explicit SetOracle(std::set<std::string> accepted) : accepted_(std::move(accepted)) {}
@@ -23,25 +25,22 @@ int main() {
     auto pta=build_pta({"", "ab", "ac"},100);
     assert(pta.accepts("")); assert(pta.accepts("ab")); assert(!pta.accepts("a"));
     StateId a{}; assert(pta.transition(pta.start_state(),'a',a));
-    auto k1=compute_k_signatures(pta,1);
-    assert(!same_k_signature(pta,pta.start_state(),a,k1));
     StateId b{},c{}; assert(pta.transition(a,'b',b)); assert(pta.transition(a,'c',c));
-    auto k2=compute_k_signatures(pta,2);
-    assert(same_k_signature(pta,b,c,k2));
-    auto k0=compute_k_signatures(pta,0);
-    assert(same_k_signature(pta,pta.start_state(),b,k0));
 
-    // Top-level signatures may agree while deterministic merge closure would
-    // force deeper, incompatible classes together. Old gammaMax rejects that
-    // complete merge, rather than checking only its red-blue endpoints.
+    // Closure can combine different continuation languages at any depth.
     auto folding_pta=build_pta({"a0x","b0y"},100);
     StateId qa{},qb{};
     assert(folding_pta.transition(folding_pta.start_state(),'a',qa));
     assert(folding_pta.transition(folding_pta.start_state(),'b',qb));
-    auto folding_signatures=compute_k_signatures(folding_pta,2);
-    assert(same_k_signature(folding_pta,qa,qb,folding_signatures));
-    auto incompatible=folding_pta; incompatible.merge_states(qa,qb);
-    assert(!respects_k_signatures(incompatible,folding_signatures));
+    PartitionedDfa folding(folding_pta);
+    const auto folding_before=folding.materialize(folding_pta).fingerprint();
+    const auto folding_checkpoint=folding.checkpoint();
+    folding.merge_with_closure(qa,qb);
+    for (const std::string value:{"a0x","b0y","a0y","b0x"})
+        assert(folding.accepts(folding_pta,value));
+    assert(!rejects_all(folding_pta,folding,{"a0y"}));
+    folding.rollback(folding_checkpoint);
+    assert(folding.materialize(folding_pta).fingerprint()==folding_before);
     NGramModel model({"aaaa","aaab"},2); assert(model.score("aaaa")>model.score("zzzz"));
     NGramModel disabled_model({"a"},0,"z");
     assert(disabled_model.score("anything")==0.0);
@@ -129,7 +128,7 @@ int main() {
     assert(paper_repair);
     assert(paper_repair->edit_distance==2);
     assert(cyclic.accepts(paper_repair->value));
-    auto merged=state_merge(pta,{"aa"},0);
+    auto merged=state_merge(pta,{"aa"});
     assert(!merged.partition.materialize(pta).accepts("aa"));
     // Learning keeps the PTA immutable and stores selected merges in a
     // lightweight partition. Materialization must preserve the quotient
@@ -144,7 +143,7 @@ int main() {
     const auto original_fingerprint=transactional.materialize(pta).fingerprint();
     const auto original_accepting=transactional.accepting_class_count();
     const auto checkpoint=transactional.checkpoint();
-    assert(transactional.merge_with_closure(pta,b,c,k2));
+    transactional.merge_with_closure(b,c);
     assert(transactional.accepting_class_count()==original_accepting-1);
     transactional.rollback(checkpoint);
     assert(transactional.accepting_class_count()==original_accepting);
@@ -162,23 +161,83 @@ int main() {
     evidence_pta.state(e0).transitions.emplace('b',eB);
     evidence_pta.state(e0).transitions.emplace('x',eX);
     evidence_pta.state(eA).transitions.emplace('x',eY);
-    auto structural_candidate=evidence_pta;
-    structural_candidate.merge_states(e0,eA);
-    auto labelled_candidate=evidence_pta;
-    labelled_candidate.merge_states(e0,eB);
-    assert(edsm_evidence(evidence_pta,structural_candidate)==0);
-    assert(edsm_evidence(evidence_pta,labelled_candidate)==1);
-    auto evidence_merge=state_merge(evidence_pta,{},0);
+    PartitionedDfa structural_candidate(evidence_pta), labelled_candidate(evidence_pta);
+    const auto accepting_before=structural_candidate.accepting_class_count();
+    structural_candidate.merge_with_closure(e0,eA);
+    labelled_candidate.merge_with_closure(e0,eB);
+    assert(accepting_before-structural_candidate.accepting_class_count()==0);
+    assert(accepting_before-labelled_candidate.accepting_class_count()==1);
+    auto evidence_merge=state_merge(evidence_pta,{});
     assert(!evidence_merge.history.empty());
     assert(evidence_merge.history.front().blue_original_states==std::vector<StateId>{eB});
+
+    // Equal evidence chooses the lowest blue ID, even when its acceptance
+    // differs from red. With no valid merge, promotion preserves the PTA.
+    auto tie_pta=build_pta({"a","b"},100);
+    auto tie_merge=state_merge(tie_pta,{});
+    assert(tie_merge.history.front().red_original_states==std::vector<StateId>{0});
+    assert(tie_merge.history.front().blue_original_states==std::vector<StateId>{1});
+    auto red_tie_pta=build_pta({"ax"},100);
+    auto red_tie=state_merge(red_tie_pta,{"x"});
+    assert(red_tie.history.front().red_original_states==std::vector<StateId>{0});
+    assert(red_tie.history.front().blue_original_states==std::vector<StateId>{2});
+    auto promoted_pta=build_pta({"a"},100);
+    auto promoted=state_merge(promoted_pta,{""});
+    assert(promoted.history.empty());
+    assert(promoted.partition.accepts(promoted_pta,"a"));
+    assert(!promoted.partition.accepts(promoted_pta,""));
+
+    // Evidence includes accepting classes folded below nonaccepting endpoints.
+    auto closure_pta=build_pta({"ax","bx"},100);
+    PartitionedDfa closure(closure_pta);
+    const auto closure_accepting=closure.accepting_class_count();
+    StateId ca{},cb{};
+    assert(closure_pta.transition(0,'a',ca));
+    assert(closure_pta.transition(0,'b',cb));
+    closure.merge_with_closure(ca,cb);
+    assert(closure_accepting-closure.accepting_class_count()==1);
+
+    // Replay commits a valid prefix, then rolls back a later merge that
+    // admits a newly learned negative. Endpoint identities remain exact.
+    const MergeHistory replay_history{{{1},{2}},{{0},{1,2}}};
+    auto valid_replay=replay_merges(tie_pta,{},replay_history);
+    assert(valid_replay.valid_history.size()==2);
+    assert(valid_replay.partition.accepts(tie_pta,""));
+    auto conflicted_replay=replay_merges(tie_pta,{""},replay_history);
+    assert(conflicted_replay.valid_history.size()==1);
+    assert(!conflicted_replay.partition.accepts(tie_pta,""));
+    assert(conflicted_replay.partition.accepts(tie_pta,"a"));
+    assert(conflicted_replay.partition.accepts(tie_pta,"b"));
+    PartitionedDfa expected_prefix(tie_pta);
+    expected_prefix.merge_with_closure(1,2);
+    assert(conflicted_replay.partition.materialize(tie_pta).fingerprint()==
+           expected_prefix.materialize(tie_pta).fingerprint());
+    auto unavailable_replay=replay_merges(tie_pta,{},MergeHistory{{{0,1},{2}}});
+    assert(unavailable_replay.valid_history.empty());
 
     auto input=parse_input_value(nlohmann::json{{"positive_examples",{"x"}},{"corrupt_string","y"}});
     assert(input.negative_examples.empty());
     auto config=parse_config_value(nlohmann::json{
-        {"oracle",{{"executable","oracle"}}},{"state_merging",{{"k",0}}},
+        {"oracle",{{"executable","oracle"}}},
         {"repair",{{"n",2},{"ngrams_batch_size",-1},{"max_candidate_length",-1}}},
         {"limits",{{"max_iterations",8},{"max_total_oracle_calls",20},{"max_states",100},{"max_queue_size",-1},{"max_rsr_candidates",-1}}}});
     assert(!config.seed);
+    nlohmann::json minimal_config{
+        {"oracle",{{"executable","oracle"}}},
+        {"repair",{{"n",0},{"ngrams_batch_size",1}}},
+        {"limits",{{"max_iterations",1},{"max_total_oracle_calls",1},{"max_states",10}}}};
+    assert(parse_config_value(minimal_config).n==0);
+    minimal_config["state_merging"]=nlohmann::json::object();
+    assert(parse_config_value(minimal_config).n==0);
+    for (const auto& obsolete_value : {nlohmann::json(0),nlohmann::json(3),nlohmann::json(nullptr)}) {
+        minimal_config["state_merging"]["k"]=obsolete_value;
+        bool rejected_k=false;
+        try { (void)parse_config_value(minimal_config); }
+        catch (const std::runtime_error& error) {
+            rejected_k=std::string(error.what()).find("state_merging.k is no longer supported; remove it")!=std::string::npos;
+        }
+        assert(rejected_k);
+    }
     assert(config.ngrams_batch_size==std::numeric_limits<std::size_t>::max());
     assert(config.max_candidate_length==std::numeric_limits<std::size_t>::max());
     assert(config.max_queue_size==std::numeric_limits<std::size_t>::max());
@@ -186,14 +245,14 @@ int main() {
     bool rejected_rsr_batch=false;
     try {
         parse_config_value(nlohmann::json{
-            {"oracle",{{"executable","oracle"}}},{"state_merging",{{"k",0}}},
+            {"oracle",{{"executable","oracle"}}},
             {"repair",{{"n",2},{"rsr_batch_size",2},{"ngrams_batch_size",1}}},
             {"limits",{{"max_iterations",1},{"max_total_oracle_calls",1},{"max_states",10}}}});
     } catch (const std::runtime_error&) { rejected_rsr_batch=true; }
     assert(rejected_rsr_batch);
     SetOracle oracle({"ab"});
     AlgorithmMeasurements measurements;
-    assert(gamma_max(InputData{{"ab"},{},"ac"},config,oracle,&measurements)=="ab");
+    assert(patchouli::patchouli(InputData{{"ab"},{},"ac"},config,oracle,&measurements)=="ab");
     assert(oracle.calls.front()=="ac");
     assert(measurements.total_iterations>=1);
     assert(measurements.edsm_execution_time_ns==
@@ -204,6 +263,7 @@ int main() {
         ProgramResult{"ab",0,0,1,measurements}));
     assert(measured_json.at("total_iterations")==measurements.total_iterations);
     assert(measured_json.contains("rsr_execution_time_ns"));
+    assert(!measured_json.contains("ktails_execution_time_ns"));
     assert(measured_json.contains("initial_state_merge_ns"));
     assert(measured_json.contains("merge_replay_ns"));
     assert(measured_json.contains("resumed_state_merge_ns"));
@@ -217,12 +277,13 @@ int main() {
     assert(measured_json.at("rsr_iterations").is_array());
     SetOracle rejecting({});
     bool rejected_batch_failed=false;
-    try { (void)gamma_max(InputData{{"ab","ac"},{},"ad"},config,rejecting); }
+    try { (void)patchouli::patchouli(InputData{{"ab","ac"},{},"ad"},config,rejecting); }
     catch (const std::runtime_error&) { rejected_batch_failed=true; }
     assert(rejected_batch_failed); assert(rejecting.calls.size()>=3);
     assert(rejecting.calls[0]=="ad");
     assert(rejecting.calls[1]!=rejecting.calls[2]);
-    auto replay=replay_merges(pta,{"ab"},merged.history);
-    assert(replay.partition.materialize(pta).accepts("ab"));
+    auto replay=replay_merges(pta,{"aa"},merged.history);
+    assert(replay.valid_history.size()==merged.history.size());
+    assert(replay.partition.materialize(pta).fingerprint()==rematerialized.fingerprint());
     std::cout << "ok\n";
 }

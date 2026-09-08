@@ -8,7 +8,7 @@
 #include <string_view>
 #include <vector>
 
-namespace gammamax {
+namespace patchouli {
 
 class NGramModel {
 public:
@@ -86,4 +86,4 @@ private:
     std::map<Context, std::size_t> totals_;
 };
 
-}  // namespace gammamax
+}  // namespace patchouli

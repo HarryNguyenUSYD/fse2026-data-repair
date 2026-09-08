@@ -1,7 +1,7 @@
 #pragma once
 
-#include "gammamax/automaton.hpp"
-#include "gammamax/types.hpp"
+#include "patchouli/automaton.hpp"
+#include "patchouli/types.hpp"
 
 #include <algorithm>
 #include <limits>
@@ -13,7 +13,7 @@
 #include <utility>
 #include <vector>
 
-namespace gammamax {
+namespace patchouli {
 
 // Lightweight quotient over an immutable PTA. Unmodified singleton classes
 // read the PTA's transition maps directly. A class receives a private
@@ -49,7 +49,6 @@ public:
     }
 
     StateId canonical(StateId state) const { return canonical_.at(find(state)); }
-    bool accepting(StateId state) const { return accepting_.at(find(state)) != 0; }
 
     std::vector<StateId> roots() const {
         std::vector<StateId> result;
@@ -77,8 +76,7 @@ public:
         return root;
     }
 
-    Cache build_cache(const Automaton& base) const {
-        (void)base;
+    Cache build_cache() const {
         Cache cache;
         cache.transitions.resize(parent_.size());
         cache.accepting.resize(parent_.size(), 0);
@@ -91,9 +89,7 @@ public:
         return cache;
     }
 
-    bool merge_with_closure(const Automaton& base, StateId left, StateId right,
-                            const std::vector<std::size_t>& signatures) {
-        (void)base;
+    void merge_with_closure(StateId left, StateId right) {
         std::vector<std::pair<StateId, StateId>> pending{{left, right}};
         while (!pending.empty()) {
             auto [first, second] = pending.back();
@@ -101,21 +97,8 @@ public:
             first = find(first);
             second = find(second);
             if (first == second) continue;
-            if (class_signature(first, signatures) != class_signature(second, signatures))
-                return false;
             unite(first, second, pending);
         }
-        return true;
-    }
-
-    bool accepts(const Automaton& base, const Cache& cache, std::string_view value) const {
-        StateId current = find(base.start_state());
-        for (unsigned char symbol : value) {
-            const auto found = cache.transitions[current].find(symbol);
-            if (found == cache.transitions[current].end()) return false;
-            current = find(found->second);
-        }
-        return accepting_[current] != 0;
     }
 
     // Execute directly on the maintained quotient. This avoids constructing a
@@ -156,7 +139,7 @@ public:
     }
 
     Automaton materialize(const Automaton& base) const {
-        const Cache cache = build_cache(base);
+        const Cache cache = build_cache();
         Automaton result;
         std::vector<StateId> dense(parent_.size(), std::numeric_limits<StateId>::max());
         for (StateId root : cache.roots)
@@ -208,11 +191,6 @@ private:
         return *storage.overlay;
     }
 
-    std::size_t class_signature(StateId root,
-                                const std::vector<std::size_t>& signatures) const {
-        return signatures.at(canonical_[find(root)]);
-    }
-
     void unite(StateId left, StateId right,
                std::vector<std::pair<StateId, StateId>>& pending) {
         left = find(left);
@@ -252,4 +230,4 @@ private:
     std::vector<UndoEntry> undo_;
 };
 
-}  // namespace gammamax
+}  // namespace patchouli

@@ -17,8 +17,7 @@
   "seed": 0,
   "workers": -1,
   "case_timeout_seconds": 300,
-  "gammamax": {
-    "k_values": [0, 1, 2, 3, 4, 5],
+  "patchouli": {
     "n_values": [0, 1, 2, 3, 4, 5],
     "ngrams_batch_size": 1,
     "max_candidate_length": -1,

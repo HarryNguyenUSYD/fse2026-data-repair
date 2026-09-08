@@ -1,11 +1,11 @@
 #pragma once
-#include "gammamax/types.hpp"
+#include "patchouli/types.hpp"
 #include <limits>
 #include <stdexcept>
 #include <string>
 #include <nlohmann/json.hpp>
 
-namespace gammamax {
+namespace patchouli {
 inline void require_object(const nlohmann::json& v, const std::string& c) {
     if (!v.is_object()) throw std::runtime_error(c + " must be a JSON object");
 }
@@ -23,11 +23,13 @@ template <typename T> inline T boundary_value(const nlohmann::json& o, const cha
 }
 inline Config parse_config_value(const nlohmann::json& root) {
     require_object(root, "config");
-    for (const char* key : {"oracle", "state_merging", "repair", "limits"})
+    for (const char* key : {"oracle", "repair", "limits"})
         if (!root.contains(key)) throw std::runtime_error("config is missing field '" + std::string(key) + "'");
-    const auto& oracle=root.at("oracle"); const auto& merging=root.at("state_merging");
+    if (root.contains("state_merging") && root.at("state_merging").contains("k"))
+        throw std::runtime_error("config.state_merging.k is no longer supported; remove it");
+    const auto& oracle=root.at("oracle");
     const auto& repair=root.at("repair"); const auto& limits=root.at("limits");
-    require_object(oracle,"config.oracle"); require_object(merging,"config.state_merging");
+    require_object(oracle,"config.oracle");
     require_object(repair,"config.repair"); require_object(limits,"config.limits");
     if (repair.contains("rsr_batch_size"))
         throw std::runtime_error("config.repair.rsr_batch_size is not supported");
@@ -37,7 +39,6 @@ inline Config parse_config_value(const nlohmann::json& root) {
     if (root.contains("seed")) r.seed=unsigned_value<std::uint64_t>(root,"seed","config");
     auto exe=oracle.at("executable").get<std::string>();
     r.oracle_executable=std::filesystem::path(std::u8string(reinterpret_cast<const char8_t*>(exe.data()),exe.size()));
-    r.k=unsigned_value<std::size_t>(merging,"k","config.state_merging");
     r.n=unsigned_value<std::size_t>(repair,"n","config.repair");
     r.ngrams_batch_size=boundary_value<std::size_t>(repair,"ngrams_batch_size","config.repair");
     r.max_candidate_length=repair.contains("max_candidate_length")
@@ -59,4 +60,4 @@ inline Config parse_config_value(const nlohmann::json& root) {
         throw std::runtime_error("configured counts and resource limits must be positive or -1 where supported");
     return r;
 }
-} // namespace gammamax
+} // namespace patchouli

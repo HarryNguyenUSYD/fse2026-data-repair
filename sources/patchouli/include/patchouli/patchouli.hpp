@@ -1,21 +1,21 @@
 #pragma once
-#include "gammamax/merge_replay.hpp"
-#include "gammamax/ngram.hpp"
-#include "gammamax/pta.hpp"
-#include "gammamax/rsr.hpp"
-#include "gammamax/state_merge.hpp"
-#include "gammamax/oracle.hpp"
+#include "patchouli/merge_replay.hpp"
+#include "patchouli/ngram.hpp"
+#include "patchouli/pta.hpp"
+#include "patchouli/rsr.hpp"
+#include "patchouli/state_merge.hpp"
+#include "patchouli/oracle.hpp"
 #include <algorithm>
 #include <chrono>
 #include <set>
 #include <stdexcept>
 
-namespace gammamax {
+namespace patchouli {
 inline std::uint64_t measurement_ns(std::chrono::steady_clock::time_point started) {
     return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::steady_clock::now()-started).count());
 }
-inline std::string gamma_max(const InputData& input,const Config& config,Oracle& oracle,
+inline std::string patchouli(const InputData& input,const Config& config,Oracle& oracle,
                              AlgorithmMeasurements* measurements=nullptr) {
     AlgorithmMeasurements local_measurements;
     if (!measurements) measurements=&local_measurements;
@@ -31,9 +31,6 @@ inline std::string gamma_max(const InputData& input,const Config& config,Oracle&
     auto stage_started=std::chrono::steady_clock::now();
     NGramModel model(positives,config.n,input.corrupt_string);
     measurements->ngrams_execution_time_ns+=measurement_ns(stage_started);
-    stage_started=std::chrono::steady_clock::now();
-    const KSignatures k_signatures=compute_k_signatures(pta,config.k);
-    measurements->ktails_execution_time_ns+=measurement_ns(stage_started);
     MergeHistory history;
     std::set<std::string> fingerprints;
     for (std::size_t iteration=0;iteration<config.max_iterations;++iteration) {
@@ -43,7 +40,7 @@ inline std::string gamma_max(const InputData& input,const Config& config,Oracle&
         if (iteration!=0) {
             stage_started=std::chrono::steady_clock::now();
             auto replay=replay_merges(pta,std::move(partition),known,history,
-                                      k_signatures,measurements);
+                                      measurements);
             const std::uint64_t replay_time=measurement_ns(stage_started);
             measurements->merge_replay_ns+=replay_time;
             measurements->edsm_execution_time_ns+=replay_time;
@@ -52,7 +49,7 @@ inline std::string gamma_max(const InputData& input,const Config& config,Oracle&
         }
 
         stage_started=std::chrono::steady_clock::now();
-        auto merged=state_merge(pta,std::move(partition),known,k_signatures,
+        auto merged=state_merge(pta,std::move(partition),known,
                                 std::move(valid_history),measurements);
         const std::uint64_t merge_time=measurement_ns(stage_started);
         if (iteration==0)
@@ -92,4 +89,4 @@ inline std::string gamma_max(const InputData& input,const Config& config,Oracle&
     }
     throw std::runtime_error("maximum repair-iteration limit exhausted");
 }
-} // namespace gammamax
+} // namespace patchouli

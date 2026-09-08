@@ -1,7 +1,7 @@
 #pragma once
 
-#include "gammamax/config.hpp"
-#include "gammamax/types.hpp"
+#include "patchouli/config.hpp"
+#include "patchouli/types.hpp"
 
 #include <algorithm>
 #include <fstream>
@@ -10,7 +10,7 @@
 
 #include <nlohmann/json.hpp>
 
-namespace gammamax {
+namespace patchouli {
 
 inline nlohmann::json read_json_file(const std::filesystem::path& path) {
     std::ifstream stream(path, std::ios::binary);
@@ -111,7 +111,6 @@ inline std::string serialize_result(const ProgramResult& result) {
         {"peak_memory_bytes", result.peak_memory_bytes},
         {"total_execution_time_ns", result.total_execution_time_ns},
         {"rsr_execution_time_ns", result.measurements.rsr_execution_time_ns},
-        {"ktails_execution_time_ns", result.measurements.ktails_execution_time_ns},
         {"edsm_execution_time_ns", result.measurements.edsm_execution_time_ns},
         {"ngrams_execution_time_ns", result.measurements.ngrams_execution_time_ns},
         {"initial_state_merge_ns", result.measurements.initial_state_merge_ns},
@@ -130,4 +129,4 @@ inline std::string serialize_result(const ProgramResult& result) {
     return output.dump();
 }
 
-}  // namespace gammamax
+}  // namespace patchouli

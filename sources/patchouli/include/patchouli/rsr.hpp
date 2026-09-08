@@ -1,8 +1,8 @@
 #pragma once
 
-#include "gammamax/automaton.hpp"
-#include "gammamax/ngram.hpp"
-#include "gammamax/types.hpp"
+#include "patchouli/automaton.hpp"
+#include "patchouli/ngram.hpp"
+#include "patchouli/types.hpp"
 #include <algorithm>
 #include <chrono>
 #include <compare>
@@ -16,7 +16,7 @@
 #include <string_view>
 #include <vector>
 
-namespace gammamax {
+namespace patchouli {
 struct RsrEdge { StateId source{},destination{}; Symbol symbol{}; };
 enum class RsrOperation : unsigned char { none,match,deletion,insertion,substitution };
 struct RsrPredecessor {
@@ -219,4 +219,4 @@ inline std::vector<RepairCandidate> rsr_repairs(
     return rsr_repairs_in_place(working,input,model,ngrams_batch_size,max_candidate_length,
         max_rsr_candidates,max_queue_size,excluded,ngrams_execution_time_ns);
 }
-} // namespace gammamax
+} // namespace patchouli

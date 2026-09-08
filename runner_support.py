@@ -29,7 +29,7 @@ RESULTS = ROOT / "results"
 FORMATS = ("date", "time", "url", "isbn", "ipv4", "ipv6")
 EXE_SUFFIX = ".exe" if os.name == "nt" else ""
 EXECUTABLES = {
-    "gammamax": BUILD / f"gammamax{EXE_SUFFIX}",
+    "patchouli": BUILD / f"patchouli{EXE_SUFFIX}",
     "betamax-old": BUILD / f"betamax-old{EXE_SUFFIX}",
     "epsilonrepair": BUILD / f"epsilonrepair{EXE_SUFFIX}",
 }
@@ -44,7 +44,6 @@ BOUNDARY_VALIDATORS = {
 }
 RESULT_FIELDS = (
     "implementation",
-    "k",
     "n",
     "max_rsr_candidates",
     "ngrams_batch_size",
@@ -65,7 +64,6 @@ RESULT_FIELDS = (
     "effective_seed",
     "total_execution_time_ns",
     "rsr_execution_time_ns",
-    "ktails_execution_time_ns",
     "edsm_execution_time_ns",
     "ngrams_execution_time_ns",
     "initial_state_merge_ns",
@@ -182,19 +180,18 @@ def load_cases() -> list[dict[str, Any]]:
     return value
 
 
-def k_n_combinations(config: dict[str, Any]) -> list[tuple[int, int]]:
-    settings = config["gammamax"]
-    k_values = [int(value) for value in settings["k_values"]]
+def n_configurations(config: dict[str, Any]) -> list[int]:
+    settings = config["patchouli"]
+    if "k_values" in settings:
+        raise ValueError("patchouli.k_values is no longer supported; remove it")
     n_values = [int(value) for value in settings["n_values"]]
-    if any(value < 0 for value in (*k_values, *n_values)):
-        raise ValueError("k and n values must be non-negative")
-    if len(set(k_values)) != len(k_values) or len(set(n_values)) != len(n_values):
-        raise ValueError("k and n lists must not contain duplicates")
-    combinations = [(k, n) for k in k_values for n in n_values]
-    if not combinations:
-        raise ValueError("no gammaMax k/n combinations configured")
-    return combinations
-
+    if any(value < 0 for value in n_values):
+        raise ValueError("n values must be non-negative")
+    if len(set(n_values)) != len(n_values):
+        raise ValueError("n list must not contain duplicates")
+    if not n_values:
+        raise ValueError("no patchouli n configurations configured")
+    return n_values
 
 def worker_count() -> int:
     configured = int(load_config()["workers"])
@@ -260,13 +257,12 @@ def _validator_accepts(format_name: str, output: str) -> bool:
 
 
 def _current_config(
-    suite_config: dict[str, Any], validator: Path, k: int, n: int
+    suite_config: dict[str, Any], validator: Path, n: int
 ) -> dict[str, Any]:
-    settings = suite_config["gammamax"]
+    settings = suite_config["patchouli"]
     return {
         "seed": int(suite_config["seed"]),
         "oracle": {"executable": str(validator.resolve())},
-        "state_merging": {"k": k},
         "repair": {
             "n": n,
             "ngrams_batch_size": int(settings["ngrams_batch_size"]),
@@ -356,7 +352,6 @@ def _launch(
 
 def execute_case(
     implementation: str,
-    k: int | None,
     n: int | None,
     case_index: int,
     case: dict[str, Any],
@@ -374,7 +369,6 @@ def execute_case(
     peak_memory: int | str = ""
     effective_seed: int | str = ""
     rsr_execution_time: int | str = ""
-    ktails_execution_time: int | str = ""
     edsm_execution_time: int | str = ""
     ngrams_execution_time: int | str = ""
     initial_state_merge_time: int | str = ""
@@ -394,16 +388,16 @@ def execute_case(
     try:
         with tempfile.TemporaryDirectory(prefix=f"{implementation}-") as directory:
             working_directory = Path(directory)
-            if implementation == "gammamax":
-                if k is None or n is None:
-                    raise ValueError("gammaMax requires k and n")
+            if implementation == "patchouli":
+                if n is None:
+                    raise ValueError("patchouli requires n")
                 input_json = {
                     "positive_examples": case["positive_examples"],
                     "negative_examples": case["negative_examples"],
                     "corrupt_string": case["corrupt_string"],
                 }
                 config_json = _current_config(
-                    suite_config, STDIN_VALIDATORS[case["format"]], k, n
+                    suite_config, STDIN_VALIDATORS[case["format"]], n
                 )
                 (working_directory / "input.json").write_text(
                     json.dumps(input_json, indent=2) + "\n", encoding="utf-8"
@@ -411,7 +405,7 @@ def execute_case(
                 (working_directory / "config.json").write_text(
                     json.dumps(config_json, indent=2) + "\n", encoding="utf-8"
                 )
-                arguments = [str(EXECUTABLES["gammamax"].resolve())]
+                arguments = [str(EXECUTABLES["patchouli"].resolve())]
             elif implementation == "betamax-old":
                 positives = working_directory / "positives.txt"
                 negatives = working_directory / "negatives.txt"
@@ -454,12 +448,12 @@ def execute_case(
             error = f"Algorithm exceeded {configured_timeout:g} seconds."
         elif return_code != 0:
             error = f"Process exited with code {return_code}."
-        elif implementation == "gammamax":
+        elif implementation == "patchouli":
             parsed = json.loads(stdout)
             required = {
                 "output_string", "effective_seed", "peak_memory_bytes",
                 "total_execution_time_ns", "rsr_execution_time_ns",
-                "ktails_execution_time_ns", "edsm_execution_time_ns",
+                "edsm_execution_time_ns",
                 "ngrams_execution_time_ns", "initial_state_merge_ns",
                 "merge_replay_ns", "resumed_state_merge_ns",
                 "candidate_copy_or_rollback_ns", "negative_validation_ns",
@@ -469,17 +463,17 @@ def execute_case(
                 "rsr_enumeration_truncated", "rsr_iterations"
             }
             if not isinstance(parsed, dict) or set(parsed) != required:
-                raise ValueError("gammaMax stdout has an unexpected JSON shape")
+                raise ValueError("patchouli stdout has an unexpected JSON shape")
             if not isinstance(parsed["output_string"], str):
-                raise ValueError("gammaMax output_string is not a string")
+                raise ValueError("patchouli output_string is not a string")
             if not isinstance(parsed["peak_memory_bytes"], int):
-                raise ValueError("gammaMax peak_memory_bytes is not an integer")
+                raise ValueError("patchouli peak_memory_bytes is not an integer")
             if not isinstance(parsed["total_execution_time_ns"], int):
-                raise ValueError("gammaMax total_execution_time_ns is not an integer")
+                raise ValueError("patchouli total_execution_time_ns is not an integer")
             if not isinstance(parsed["effective_seed"], int):
-                raise ValueError("gammaMax effective_seed is not an integer")
+                raise ValueError("patchouli effective_seed is not an integer")
             for field in (
-                "rsr_execution_time_ns", "ktails_execution_time_ns",
+                "rsr_execution_time_ns",
                 "edsm_execution_time_ns", "ngrams_execution_time_ns",
                 "initial_state_merge_ns", "merge_replay_ns",
                 "resumed_state_merge_ns", "candidate_copy_or_rollback_ns",
@@ -487,20 +481,20 @@ def execute_case(
                 "total_iterations",
             ):
                 if not isinstance(parsed[field], int):
-                    raise ValueError(f"gammaMax {field} is not an integer")
+                    raise ValueError(f"patchouli {field} is not an integer")
             for field in (
                 "rsr_total_calls", "rsr_candidates_generated",
                 "rsr_max_candidates_in_call",
                 "rsr_calls_with_multiple_candidates",
             ):
                 if not isinstance(parsed[field], int):
-                    raise ValueError(f"gammaMax {field} is not an integer")
+                    raise ValueError(f"patchouli {field} is not an integer")
             if not isinstance(parsed["rsr_enumeration_truncated"], bool):
                 raise ValueError(
-                    "gammaMax rsr_enumeration_truncated is not boolean"
+                    "patchouli rsr_enumeration_truncated is not boolean"
                 )
             if not isinstance(parsed["rsr_iterations"], list):
-                raise ValueError("gammaMax rsr_iterations is not an array")
+                raise ValueError("patchouli rsr_iterations is not an array")
             expected_iteration_fields = {
                 "minimum_edit_cost", "unique_candidates",
                 "candidates_after_ngrams", "enumeration_complete",
@@ -511,7 +505,7 @@ def execute_case(
                     or set(iteration) != expected_iteration_fields
                 ):
                     raise ValueError(
-                        "gammaMax RSR iteration has an unexpected JSON shape"
+                        "patchouli RSR iteration has an unexpected JSON shape"
                     )
                 integer_fields = (
                     "minimum_edit_cost", "unique_candidates",
@@ -522,18 +516,17 @@ def execute_case(
                     or not isinstance(iteration["enumeration_complete"], bool)
                 ):
                     raise ValueError(
-                        "gammaMax RSR iteration has invalid field types"
+                        "patchouli RSR iteration has invalid field types"
                     )
             if len(parsed["rsr_iterations"]) != parsed["rsr_total_calls"]:
                 raise ValueError(
-                    "gammaMax RSR call count does not match iteration details"
+                    "patchouli RSR call count does not match iteration details"
                 )
             output = parsed["output_string"]
             effective_seed = parsed["effective_seed"]
             execution_time = parsed["total_execution_time_ns"]
             peak_memory = parsed["peak_memory_bytes"]
             rsr_execution_time = parsed["rsr_execution_time_ns"]
-            ktails_execution_time = parsed["ktails_execution_time_ns"]
             edsm_execution_time = parsed["edsm_execution_time_ns"]
             ngrams_execution_time = parsed["ngrams_execution_time_ns"]
             initial_state_merge_time = parsed["initial_state_merge_ns"]
@@ -583,10 +576,9 @@ def execute_case(
 
     return {
         "implementation": implementation,
-        "k": "" if k is None else k,
         "n": "" if n is None else n,
-        "max_rsr_candidates": suite_config["gammamax"]["max_rsr_candidates"] if implementation == "gammamax" else "",
-        "ngrams_batch_size": suite_config["gammamax"]["ngrams_batch_size"] if implementation == "gammamax" else "",
+        "max_rsr_candidates": suite_config["patchouli"]["max_rsr_candidates"] if implementation == "patchouli" else "",
+        "ngrams_batch_size": suite_config["patchouli"]["ngrams_batch_size"] if implementation == "patchouli" else "",
         "case_index": case_index,
         "case_id": case["case_id"],
         "format": case["format"],
@@ -604,7 +596,6 @@ def execute_case(
         "effective_seed": effective_seed,
         "total_execution_time_ns": execution_time,
         "rsr_execution_time_ns": rsr_execution_time,
-        "ktails_execution_time_ns": ktails_execution_time,
         "edsm_execution_time_ns": edsm_execution_time,
         "ngrams_execution_time_ns": ngrams_execution_time,
         "initial_state_merge_ns": initial_state_merge_time,
@@ -631,7 +622,6 @@ def execute_case(
 
 def _run_phase(
     implementation: str,
-    k: int | None,
     n: int | None,
     cases: list[dict[str, Any]],
     config: dict[str, Any],
@@ -641,7 +631,7 @@ def _run_phase(
     timer_started: float,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any] | None] = [None] * len(cases)
-    label = implementation if k is None else f"{implementation}-k-{k}-n-{n}"
+    label = implementation if n is None else f"{implementation}-n-{n}"
     print(f"{label}: {len(cases)} cases, {workers} workers", flush=True)
     progress = ProgressReporter(
         label, len(cases), total_executions, total_offset, timer_started
@@ -650,7 +640,7 @@ def _run_phase(
     try:
         with ProcessPoolExecutor(max_workers=workers) as pool:
             futures = {
-                pool.submit(execute_case, implementation, k, n, index, case, config): index
+                pool.submit(execute_case, implementation, n, index, case, config): index
                 for index, case in enumerate(cases)
             }
             for future in as_completed(futures):
@@ -689,7 +679,7 @@ def _summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
         for row in rows
     ]
     measurement_fields = (
-        "rsr_execution_time_ns", "ktails_execution_time_ns",
+        "rsr_execution_time_ns",
         "edsm_execution_time_ns", "ngrams_execution_time_ns",
         "initial_state_merge_ns", "merge_replay_ns",
         "resumed_state_merge_ns", "candidate_copy_or_rollback_ns",
@@ -746,7 +736,7 @@ def _summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
         ),
         "median_wall_time_seconds_is_infinite": median_wall_time_is_infinite,
     }
-    if rows and rows[0]["implementation"] == "gammamax":
+    if rows and rows[0]["implementation"] == "patchouli":
         summary["rsr_candidate_diagnostics"] = {
             "total_calls": sum(
                 int(row["rsr_total_calls"]) for row in observed
@@ -804,40 +794,39 @@ def run_benchmark(
 ) -> None:
     if workers < 1:
         raise ValueError("workers must be at least 1")
+    config = load_config()
+    n_values = n_configurations(config)
     _ensure_binaries()
     cases = load_cases()
     if case_limit is not None:
         if case_limit < 1:
             raise ValueError("case_limit must be at least 1")
         cases = cases[:case_limit]
-    config = load_config()
     started = time.perf_counter()
     timer_started = time.monotonic()
 
-    combinations = k_n_combinations(config)
-    total_executions = len(cases) * (len(combinations) + 2)
+    total_executions = len(cases) * (len(n_values) + 2)
     all_rows: list[dict[str, Any]] = []
     summaries: dict[str, Any] = {}
     total_offset = 0
-    for k, n in combinations:
-        label = f"gammamax-k-{k}-n-{n}"
+    for n in n_values:
+        label = f"patchouli-n-{n}"
         rows = _run_phase(
-            "gammamax", k, n, cases, config, workers,
+            "patchouli", n, cases, config, workers,
             total_offset=total_offset, total_executions=total_executions,
             timer_started=timer_started,
         )
         all_rows.extend(rows)
         summaries[label] = {
-            "k": k,
             "n": n,
-            "max_rsr_candidates": int(config["gammamax"]["max_rsr_candidates"]),
-            "ngrams_batch_size": int(config["gammamax"]["ngrams_batch_size"]),
+            "max_rsr_candidates": int(config["patchouli"]["max_rsr_candidates"]),
+            "ngrams_batch_size": int(config["patchouli"]["ngrams_batch_size"]),
             **_summary(rows),
         }
         total_offset += len(cases)
 
     betamax_rows = _run_phase(
-        "betamax-old", None, None, cases, config, workers,
+        "betamax-old", None, cases, config, workers,
         total_offset=total_offset, total_executions=total_executions,
         timer_started=timer_started,
     )
@@ -846,7 +835,7 @@ def run_benchmark(
     total_offset += len(cases)
 
     epsilonrepair_rows = _run_phase(
-        "epsilonrepair", None, None, cases, config, workers,
+        "epsilonrepair", None, cases, config, workers,
         total_offset=total_offset, total_executions=total_executions,
         timer_started=timer_started,
     )
@@ -860,9 +849,9 @@ def run_benchmark(
         "workers": workers,
         "seed": config["seed"],
         "case_timeout_seconds": config["case_timeout_seconds"],
-        "k_n_combinations": len(combinations),
+        "n_configurations": len(n_values),
         "base_cases": len(cases),
-        "implementations_per_case": len(combinations) + 2,
+        "implementations_per_case": len(n_values) + 2,
         "total_case_runs": total_executions,
         "environment": _environment_metadata(),
         "suite_config": config,

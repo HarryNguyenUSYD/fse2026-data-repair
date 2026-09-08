@@ -11,11 +11,13 @@
 #include <psapi.h>
 #elif defined(__APPLE__)
 #include <mach/mach.h>
+#elif defined(__linux__)
+#include <sys/resource.h>
 #else
-#error "gammaMax peak memory measurement supports only Windows and macOS"
+#error "patchouli peak memory measurement supports only Windows, macOS, and Linux"
 #endif
 
-namespace gammamax {
+namespace patchouli {
 
 inline std::uint64_t peak_memory_bytes() {
 #if defined(_WIN32)
@@ -25,7 +27,7 @@ inline std::uint64_t peak_memory_bytes() {
         throw std::runtime_error("GetProcessMemoryInfo failed");
     }
     return static_cast<std::uint64_t>(counters.PeakWorkingSetSize);
-#else
+#elif defined(__APPLE__)
     mach_task_basic_info_data_t info{};
     mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
     if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO,
@@ -33,7 +35,13 @@ inline std::uint64_t peak_memory_bytes() {
         throw std::runtime_error("Mach task_info failed");
     }
     return static_cast<std::uint64_t>(info.resident_size_max);
+#elif defined(__linux__)
+    rusage usage{};
+    if (getrusage(RUSAGE_SELF, &usage) != 0) {
+        throw std::runtime_error("getrusage failed");
+    }
+    return static_cast<std::uint64_t>(usage.ru_maxrss) * 1024;
 #endif
 }
 
-}  // namespace gammamax
+}  // namespace patchouli

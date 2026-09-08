@@ -7,7 +7,7 @@
 #include <string>
 #include <vector>
 
-namespace gammamax {
+namespace patchouli {
 
 using StateId = std::uint32_t;
 using Symbol = unsigned char;
@@ -21,7 +21,6 @@ struct InputData {
 struct Config {
     std::optional<std::uint64_t> seed;
     std::filesystem::path oracle_executable;
-    std::size_t k{};
     std::size_t n{};
     std::size_t ngrams_batch_size{1};
     std::size_t max_candidate_length{};
@@ -53,7 +52,6 @@ struct RsrIterationMeasurement {
 
 struct AlgorithmMeasurements {
     std::uint64_t rsr_execution_time_ns{};
-    std::uint64_t ktails_execution_time_ns{};
     std::uint64_t edsm_execution_time_ns{};
     std::uint64_t ngrams_execution_time_ns{};
     std::uint64_t initial_state_merge_ns{};
@@ -73,4 +71,4 @@ struct ProgramResult {
     AlgorithmMeasurements measurements;
 };
 
-}  // namespace gammamax
+}  // namespace patchouli

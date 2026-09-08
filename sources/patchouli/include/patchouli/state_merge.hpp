@@ -1,8 +1,7 @@
 #pragma once
 
-#include "gammamax/k_tails.hpp"
-#include "gammamax/partitioned_dfa.hpp"
-#include "gammamax/types.hpp"
+#include "patchouli/partitioned_dfa.hpp"
+#include "patchouli/types.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -12,7 +11,7 @@
 #include <utility>
 #include <vector>
 
-namespace gammamax {
+namespace patchouli {
 
 struct StateMergeResult {
     PartitionedDfa partition;
@@ -40,26 +39,8 @@ inline std::uint64_t state_merge_elapsed_ns(
             std::chrono::steady_clock::now() - started).count());
 }
 
-inline std::size_t edsm_evidence(const PartitionedDfa& before,
-                                 const PartitionedDfa& after) {
-    return before.accepting_class_count() - after.accepting_class_count();
-}
-
-// Compatibility helper retained for callers comparing materialized DFAs.
-inline std::size_t edsm_evidence(const Automaton& before, const Automaton& after) {
-    std::set<StateId> resulting_accepting_classes;
-    std::size_t accepting_classes = 0;
-    for (StateId state : before.active_states()) {
-        if (!before.state(state).accepting) continue;
-        ++accepting_classes;
-        resulting_accepting_classes.insert(after.resolve(state));
-    }
-    return accepting_classes - resulting_accepting_classes.size();
-}
-
 inline StateMergeResult state_merge(const Automaton& base, PartitionedDfa initial,
                                     const std::set<std::string>& negatives,
-                                    const KSignatures& signatures,
                                     MergeHistory history = {},
                                     AlgorithmMeasurements* measurements = nullptr) {
     PartitionedDfa partition = std::move(initial);
@@ -67,7 +48,7 @@ inline StateMergeResult state_merge(const Automaton& base, PartitionedDfa initia
 
     for (;;) {
         red = normalized(partition, red);
-        const auto cache = partition.build_cache(base);
+        const auto cache = partition.build_cache();
         std::set<StateId> blue;
         for (StateId red_state : red) {
             for (const auto& [symbol, destination] : cache.transitions[red_state]) {
@@ -89,30 +70,22 @@ inline StateMergeResult state_merge(const Automaton& base, PartitionedDfa initia
 
         for (StateId blue_state : blue) {
             for (StateId red_state : red) {
-                if (signatures.at(partition.canonical(red_state)) !=
-                    signatures.at(partition.canonical(blue_state)))
-                    continue;
                 auto red_members = partition.members(red_state);
                 auto blue_members = partition.members(blue_state);
                 const std::size_t before_accepting =
                     partition.accepting_class_count();
                 const auto checkpoint = partition.checkpoint();
                 auto transaction_started = std::chrono::steady_clock::now();
-                const bool compatible = partition.merge_with_closure(
-                    base, red_state, blue_state, signatures);
+                partition.merge_with_closure(red_state, blue_state);
                 if (measurements)
                     measurements->candidate_copy_or_rollback_ns +=
                         state_merge_elapsed_ns(transaction_started);
 
-                bool consistent = false;
-                std::size_t evidence = 0;
-                if (compatible) {
-                    auto validation_started = std::chrono::steady_clock::now();
-                    consistent = rejects_all(base, partition, negatives);
-                    if (measurements)
-                        measurements->negative_validation_ns +=
-                            state_merge_elapsed_ns(validation_started);
-                }
+                const auto validation_started = std::chrono::steady_clock::now();
+                const bool consistent = rejects_all(base, partition, negatives);
+                if (measurements)
+                    measurements->negative_validation_ns +=
+                        state_merge_elapsed_ns(validation_started);
 
                 // Evidence is the accepting-class reduction from the checkpoint.
                 const std::size_t after_accepting = partition.accepting_class_count();
@@ -121,8 +94,8 @@ inline StateMergeResult state_merge(const Automaton& base, PartitionedDfa initia
                 if (measurements)
                     measurements->candidate_copy_or_rollback_ns +=
                         state_merge_elapsed_ns(transaction_started);
-                if (!compatible || !consistent) continue;
-                evidence = before_accepting - after_accepting;
+                if (!consistent) continue;
+                const std::size_t evidence = before_accepting - after_accepting;
 
                 Choice choice{evidence, partition.canonical(red_state),
                               partition.canonical(blue_state),
@@ -143,9 +116,7 @@ inline StateMergeResult state_merge(const Automaton& base, PartitionedDfa initia
         }
         const auto checkpoint = partition.checkpoint();
         auto transaction_started = std::chrono::steady_clock::now();
-        if (!partition.merge_with_closure(base, best->red_canonical,
-                                          best->blue_canonical, signatures))
-            throw std::runtime_error("selected EDSM merge could not be reapplied");
+        partition.merge_with_closure(best->red_canonical, best->blue_canonical);
         partition.commit(checkpoint);
         if (measurements)
             measurements->candidate_copy_or_rollback_ns +=
@@ -158,18 +129,10 @@ inline StateMergeResult state_merge(const Automaton& base, PartitionedDfa initia
 
 inline StateMergeResult state_merge(const Automaton& base,
                                     const std::set<std::string>& negatives,
-                                    const KSignatures& signatures,
                                     MergeHistory history = {},
                                     AlgorithmMeasurements* measurements = nullptr) {
-    return state_merge(base, PartitionedDfa(base), negatives, signatures,
+    return state_merge(base, PartitionedDfa(base), negatives,
                        std::move(history), measurements);
 }
 
-inline StateMergeResult state_merge(const Automaton& base,
-                                    const std::set<std::string>& negatives,
-                                    std::size_t k, MergeHistory history = {}) {
-    return state_merge(base, negatives, compute_k_signatures(base, k),
-                       std::move(history));
-}
-
-}  // namespace gammamax
+}  // namespace patchouli

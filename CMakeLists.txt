@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
-project(fse_benchmark LANGUAGES CXX)
+project(fse2026_new_test LANGUAGES CXX)
+include(CTest)
 
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 foreach(configuration Debug Release RelWithDebInfo MinSizeRel)
@@ -7,9 +8,9 @@ foreach(configuration Debug Release RelWithDebInfo MinSizeRel)
   set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_${configuration_upper} ${CMAKE_BINARY_DIR})
 endforeach()
 
-set(GAMMAMAX_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/sources/gammamax")
-add_subdirectory(${GAMMAMAX_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR}/gammamax-build)
-add_executable(betamax-old sources/betamax-old/main.cpp)
+set(PATCHOULI_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/sources/patchouli")
+add_subdirectory(${PATCHOULI_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR}/patchouli-build)
+add_executable(betamax-old sources/betamax/main.cpp)
 target_compile_features(betamax-old PRIVATE cxx_std_20)
 
 add_executable(epsilonrepair sources/epsilonrepair/erepair2.cpp)

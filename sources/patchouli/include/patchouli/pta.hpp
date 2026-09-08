@@ -1,13 +1,13 @@
 #pragma once
 
-#include "gammamax/automaton.hpp"
+#include "patchouli/automaton.hpp"
 
 #include <algorithm>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
-namespace gammamax {
+namespace patchouli {
 
 inline Automaton build_pta(std::vector<std::string> positives, std::size_t max_states) {
     std::sort(positives.begin(), positives.end());
@@ -38,4 +38,4 @@ inline Automaton build_pta(std::vector<std::string> positives, std::size_t max_s
     return automaton;
 }
 
-}  // namespace gammamax
+}  // namespace patchouli

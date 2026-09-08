@@ -13,7 +13,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
-#elif defined(__APPLE__)
+#elif defined(__APPLE__) || defined(__linux__)
 #include <fcntl.h>
 #include <signal.h>
 #include <spawn.h>
@@ -21,10 +21,10 @@
 #include <unistd.h>
 extern char** environ;
 #else
-#error "gammaMax external oracle supports only Windows and macOS"
+#error "patchouli external oracle supports only Windows, macOS, and Linux"
 #endif
 
-namespace gammamax {
+namespace patchouli {
 
 class Oracle {
 public:
@@ -45,11 +45,9 @@ public:
 #if defined(_WIN32)
         return accepts_windows(value);
 #else
-        return accepts_macos(value);
+        return accepts_posix(value);
 #endif
     }
-
-    std::size_t calls() const noexcept { return calls_; }
 
 private:
 #if defined(_WIN32)
@@ -170,7 +168,7 @@ private:
                                  std::to_string(exit_code));
     }
 #else
-    bool accepts_macos(std::string_view value) const {
+    bool accepts_posix(std::string_view value) const {
         static const bool sigpipe_ignored = [] {
             return signal(SIGPIPE, SIG_IGN) != SIG_ERR;
         }();
@@ -259,4 +257,4 @@ private:
     std::size_t calls_{};
 };
 
-}  // namespace gammamax
+}  // namespace patchouli
