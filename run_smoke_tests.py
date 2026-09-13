@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run one base case through every configured algorithm."""
+"""Run one base case through all 30 Patchouli batch/n configurations."""
 
 from runner_support import run_benchmark, worker_count
 

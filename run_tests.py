@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Benchmark all configured algorithms on every generated case."""
+"""Benchmark all Patchouli batch/n configurations on every generated case."""
 
 from runner_support import run_benchmark, worker_count
 

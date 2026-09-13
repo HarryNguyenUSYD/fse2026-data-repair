@@ -1,3 +1,4 @@
+#include <nlohmann/json.hpp>
 #include <algorithm>
 #include <cctype>
 #include <filesystem>
@@ -84,6 +85,7 @@ bool is_url(const std::string& value) {
 }  // namespace
 
 int main(int argc, char** argv) {
+    try {
     std::string input;
 #if defined(VALIDATOR_FILE_INPUT)
     if (argc != 2) return 2;
@@ -103,13 +105,26 @@ int main(int argc, char** argv) {
     else if (name.starts_with(prefix)) name.erase(0, prefix.size());
     else return 2;
 
-    bool accepted = false;
-    if (name == "date") accepted = is_date(input);
-    else if (name == "time") accepted = is_time(input);
-    else if (name == "url") accepted = is_url(input);
-    else if (name == "isbn") accepted = is_isbn(input);
-    else if (name == "ipv4") accepted = is_ipv4(input);
-    else if (name == "ipv6") accepted = is_ipv6(input);
-    else return 2;
-    return accepted ? 0 : 1;
+    const auto values = nlohmann::json::parse(input);
+    if (!values.is_array()) throw std::runtime_error("expected a JSON string array");
+    auto result = nlohmann::json::array();
+    for (const auto& item : values) {
+        if (!item.is_string()) throw std::runtime_error("expected string array entries");
+        const auto& value = item.get_ref<const std::string&>();
+        bool accepted = false;
+        if (name == "date") accepted = is_date(value);
+        else if (name == "time") accepted = is_time(value);
+        else if (name == "url") accepted = is_url(value);
+        else if (name == "isbn") accepted = is_isbn(value);
+        else if (name == "ipv4") accepted = is_ipv4(value);
+        else if (name == "ipv6") accepted = is_ipv6(value);
+        else throw std::runtime_error("unknown validator");
+        result.push_back(accepted);
+    }
+    std::cout << result.dump() << '\n';
+    return std::cout ? 0 : 2;
+    } catch (const std::exception& error) {
+        std::cerr << error.what() << '\n';
+        return 2;
+    }
 }

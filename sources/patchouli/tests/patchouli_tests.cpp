@@ -11,17 +11,55 @@
 #include <cassert>
 #include <iostream>
 #include <limits>
+#include <thread>
 
 using namespace patchouli;
 class SetOracle final : public Oracle {
 public:
     explicit SetOracle(std::set<std::string> accepted) : accepted_(std::move(accepted)) {}
-    bool accepts(std::string_view value) override { std::string text(value); calls.push_back(text); return accepted_.contains(text); }
+    std::vector<bool> accepts_batch(const std::vector<std::string>& values) override { batches.push_back(values); std::vector<bool> result; for (const auto& text:values) { calls.push_back(text); result.push_back(accepted_.contains(text)); } return result; }
+    std::vector<std::vector<std::string>> batches;
     std::vector<std::string> calls;
 private:
     std::set<std::string> accepted_;
 };
 int main() {
+    // Wall timing must include waiting and accumulate both initial and repair calls.
+    class WaitingOracle final : public Oracle {
+    public:
+        unsigned calls{};
+        std::vector<std::string> last_batch;
+        std::vector<bool> accepts_batch(const std::vector<std::string>& values) override {
+            last_batch=values;
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            return std::vector<bool>(values.size(), ++calls>=2);
+        }
+    };
+    // Retention must be a prefix of the complete, score-sorted candidate list.
+    const auto unlimited=std::numeric_limits<std::size_t>::max();
+    const std::vector<std::string> batch_words{"aa","ab","ac","ad","ae","af","ag","ah","ai","aj"};
+    auto batch_pta=build_pta(batch_words,100);
+    for (std::size_t n=0;n<=5;++n) {
+        NGramModel batch_model({"aj","aj","ai","ab"},n);
+        auto all=rsr_repairs(batch_pta,"az",batch_model,unlimited,unlimited,unlimited,unlimited);
+        assert(all.size()==batch_words.size());
+        for (std::size_t i=1;i<all.size();++i) {
+            assert(all[i-1].ngram_score>=all[i].ngram_score);
+            if (all[i-1].ngram_score==all[i].ngram_score)
+                assert(all[i-1].value<all[i].value);
+        }
+        for (std::size_t batch:{1u,2u,4u,8u,16u}) {
+            auto top=rsr_repairs(batch_pta,"az",batch_model,batch,unlimited,unlimited,unlimited);
+            assert(top.size()==std::min(batch,all.size()));
+            for (std::size_t i=0;i<top.size();++i) {
+                assert(top[i].value==all[i].value);
+                assert(top[i].ngram_score==all[i].ngram_score);
+            }
+        }
+        auto small=build_pta({"aa","ab"},100);
+        auto retained=rsr_repairs(small,"az",batch_model,8,unlimited,unlimited,unlimited);
+        assert(retained.size()==2);
+    }
     auto pta=build_pta({"", "ab", "ac"},100);
     assert(pta.accepts("")); assert(pta.accepts("ab")); assert(!pta.accepts("a"));
     StateId a{}; assert(pta.transition(pta.start_state(),'a',a));
@@ -220,12 +258,12 @@ int main() {
     auto config=parse_config_value(nlohmann::json{
         {"oracle",{{"executable","oracle"}}},
         {"repair",{{"n",2},{"ngrams_batch_size",-1},{"max_candidate_length",-1}}},
-        {"limits",{{"max_iterations",8},{"max_total_oracle_calls",20},{"max_states",100},{"max_queue_size",-1},{"max_rsr_candidates",-1}}}});
+        {"limits",{{"max_iterations",8},{"max_states",100},{"max_queue_size",-1},{"max_rsr_candidates",-1}}}});
     assert(!config.seed);
     nlohmann::json minimal_config{
         {"oracle",{{"executable","oracle"}}},
         {"repair",{{"n",0},{"ngrams_batch_size",1}}},
-        {"limits",{{"max_iterations",1},{"max_total_oracle_calls",1},{"max_states",10}}}};
+        {"limits",{{"max_iterations",1},{"max_states",10}}}};
     assert(parse_config_value(minimal_config).n==0);
     minimal_config["state_merging"]=nlohmann::json::object();
     assert(parse_config_value(minimal_config).n==0);
@@ -247,7 +285,7 @@ int main() {
         parse_config_value(nlohmann::json{
             {"oracle",{{"executable","oracle"}}},
             {"repair",{{"n",2},{"rsr_batch_size",2},{"ngrams_batch_size",1}}},
-            {"limits",{{"max_iterations",1},{"max_total_oracle_calls",1},{"max_states",10}}}});
+            {"limits",{{"max_iterations",1},{"max_states",10}}}});
     } catch (const std::runtime_error&) { rejected_rsr_batch=true; }
     assert(rejected_rsr_batch);
     SetOracle oracle({"ab"});
@@ -255,6 +293,21 @@ int main() {
     assert(patchouli::patchouli(InputData{{"ab"},{},"ac"},config,oracle,&measurements)=="ab");
     assert(oracle.calls.front()=="ac");
     assert(measurements.total_iterations>=1);
+    WaitingOracle waiting;
+    AlgorithmMeasurements waiting_measurements;
+    const auto first_accepted=patchouli::patchouli(InputData{{"ab"},{},"ac"},config,waiting,
+                               &waiting_measurements);
+    assert(first_accepted==waiting.last_batch.front());
+    assert(first_accepted!="ac");
+    assert(waiting.calls==2);
+    assert(waiting_measurements.oracle_execution_time_ns>=20000000);
+    WaitingOracle initial_accept;
+    initial_accept.calls=1;
+    AlgorithmMeasurements initial_measurements;
+    assert(patchouli::patchouli(InputData{{"ab"},{},"ac"},config,initial_accept,
+                               &initial_measurements)=="ac");
+    assert(initial_measurements.oracle_execution_time_ns>=10000000);
+    assert(initial_measurements.total_iterations==0);
     assert(measurements.edsm_execution_time_ns==
            measurements.initial_state_merge_ns+
            measurements.merge_replay_ns+
@@ -263,6 +316,7 @@ int main() {
         ProgramResult{"ab",0,0,1,measurements}));
     assert(measured_json.at("total_iterations")==measurements.total_iterations);
     assert(measured_json.contains("rsr_execution_time_ns"));
+    assert(measured_json.at("oracle_execution_time_ns")==measurements.oracle_execution_time_ns);
     assert(!measured_json.contains("ktails_execution_time_ns"));
     assert(measured_json.contains("initial_state_merge_ns"));
     assert(measured_json.contains("merge_replay_ns"));
@@ -282,6 +336,14 @@ int main() {
     assert(rejected_batch_failed); assert(rejecting.calls.size()>=3);
     assert(rejecting.calls[0]=="ad");
     assert(rejecting.calls[1]!=rejecting.calls[2]);
+    assert(rejecting.batches.front()==std::vector<std::string>{"ad"});
+    assert(rejecting.batches[1].size()>=2);
+    std::set<std::string> queried;
+    for (const auto& batch:rejecting.batches)
+        for (const auto& value:batch) assert(queried.insert(value).second);
+    SetOracle known_negative({"ab"});
+    assert(patchouli::patchouli(InputData{{"ab"},{"aa"},"ac"},config,known_negative)=="ab");
+    assert(std::find(known_negative.calls.begin(),known_negative.calls.end(),"aa")==known_negative.calls.end());
     auto replay=replay_merges(pta,{"aa"},merged.history);
     assert(replay.valid_history.size()==merged.history.size());
     assert(replay.partition.materialize(pta).fingerprint()==rematerialized.fingerprint());

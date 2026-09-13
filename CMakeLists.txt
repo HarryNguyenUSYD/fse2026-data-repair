@@ -1,32 +1,25 @@
 cmake_minimum_required(VERSION 3.20)
-project(fse2026_new_test LANGUAGES CXX)
+project(patchouli_batch_suite LANGUAGES CXX)
 include(CTest)
-
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 foreach(configuration Debug Release RelWithDebInfo MinSizeRel)
   string(TOUPPER ${configuration} configuration_upper)
   set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_${configuration_upper} ${CMAKE_BINARY_DIR})
 endforeach()
-
-set(PATCHOULI_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/sources/patchouli")
-add_subdirectory(${PATCHOULI_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR}/patchouli-build)
-add_executable(betamax-old sources/betamax/main.cpp)
-target_compile_features(betamax-old PRIVATE cxx_std_20)
-
-add_executable(epsilonrepair sources/epsilonrepair/erepair2.cpp)
-target_compile_features(epsilonrepair PRIVATE cxx_std_17)
-if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-  target_compile_options(epsilonrepair PRIVATE -include algorithm)
-endif()
-
+add_subdirectory(sources/patchouli patchouli-build)
 foreach(format date time url isbn ipv4 ipv6)
   add_executable(validate_${format} validators/validator.cpp)
   target_compile_features(validate_${format} PRIVATE cxx_std_20)
-
-  add_executable(validate_old_${format} validators/validator.cpp)
-  target_compile_features(validate_old_${format} PRIVATE cxx_std_20)
-  target_compile_definitions(validate_old_${format} PRIVATE VALIDATOR_FILE_INPUT=1)
-
-  add_executable(boundary_validate_${format} validators/boundary_validator.cpp)
-  target_compile_features(boundary_validate_${format} PRIVATE cxx_std_20)
+  target_include_directories(validate_${format} PRIVATE sources/patchouli/third_party)
 endforeach()
+
+if(BUILD_TESTING)
+  add_executable(oracle_driver sources/patchouli/tests/oracle_driver.cpp)
+  target_compile_features(oracle_driver PRIVATE cxx_std_20)
+  target_include_directories(oracle_driver PRIVATE sources/patchouli/include sources/patchouli/third_party)
+  find_package(Python3 COMPONENTS Interpreter REQUIRED)
+  add_test(NAME oracle_integration COMMAND ${Python3_EXECUTABLE} -m unittest test_oracle_integration.py)
+  set_tests_properties(oracle_integration PROPERTIES
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+    ENVIRONMENT "ORACLE_TEST_BUILD=${CMAKE_BINARY_DIR}")
+endif()

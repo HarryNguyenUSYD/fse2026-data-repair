@@ -7,6 +7,9 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <vector>
+#include <cerrno>
+#include <nlohmann/json.hpp>
 
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -29,24 +32,31 @@ namespace patchouli {
 class Oracle {
 public:
     virtual ~Oracle() = default;
-    virtual bool accepts(std::string_view value) = 0;
+    virtual std::vector<bool> accepts_batch(const std::vector<std::string>& values) = 0;
 };
 
 class ExternalOracle final : public Oracle {
 public:
-    ExternalOracle(std::filesystem::path executable, std::size_t max_calls)
-        : executable_(std::move(executable)), max_calls_(max_calls) {}
+    explicit ExternalOracle(std::filesystem::path executable)
+        : executable_(std::move(executable)) {}
 
-    bool accepts(std::string_view value) override {
-        if (calls_ >= max_calls_) {
-            throw std::runtime_error("maximum total oracle-call limit exhausted");
-        }
-        ++calls_;
+    std::vector<bool> accepts_batch(const std::vector<std::string>& values) override {
+        if (values.empty()) return {};
+        const auto request=nlohmann::json(values).dump();
 #if defined(_WIN32)
-        return accepts_windows(value);
+        const auto output=accepts_windows(request);
 #else
-        return accepts_posix(value);
+        const auto output=accepts_posix(request);
 #endif
+        const auto result=nlohmann::json::parse(output);
+        if (!result.is_array() || result.size()!=values.size())
+            throw std::runtime_error("oracle result count mismatch: expected boolean array");
+        std::vector<bool> accepted;
+        for (const auto& item:result) {
+            if (!item.is_boolean()) throw std::runtime_error("oracle result is not boolean");
+            accepted.push_back(item.get<bool>());
+        }
+        return accepted;
     }
 
 private:
@@ -87,7 +97,7 @@ private:
                std::to_string(GetLastError());
     }
 
-    bool accepts_windows(std::string_view value) const {
+    std::string accepts_windows(std::string_view value) const {
         SECURITY_ATTRIBUTES security{};
         security.nLength = sizeof(security);
         security.bInheritHandle = TRUE;
@@ -103,32 +113,37 @@ private:
             throw std::runtime_error(windows_error("SetHandleInformation"));
         }
 
-        Handle null_output(CreateFileW(L"NUL", GENERIC_WRITE,
-                                       FILE_SHARE_READ | FILE_SHARE_WRITE, &security,
-                                       OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
-        if (null_output.get() == INVALID_HANDLE_VALUE) {
-            null_output.release();
-            throw std::runtime_error(windows_error("CreateFileW(NUL)"));
-        }
+        if (!CreatePipe(&raw_read, &raw_write, &security, 0))
+            throw std::runtime_error(windows_error("CreatePipe(stdout)"));
+        Handle output_read(raw_read);
+        Handle output_write(raw_write);
+        if (!SetHandleInformation(output_read.get(), HANDLE_FLAG_INHERIT, 0))
+            throw std::runtime_error(windows_error("SetHandleInformation(stdout)"));
 
         STARTUPINFOW startup{};
         startup.cb = sizeof(startup);
         startup.dwFlags = STARTF_USESTDHANDLES;
         startup.hStdInput = input_read.get();
-        startup.hStdOutput = null_output.get();
+        startup.hStdOutput = output_write.get();
         startup.hStdError = GetStdHandle(STD_ERROR_HANDLE);
         PROCESS_INFORMATION process{};
 
         const std::wstring executable = executable_.wstring();
         std::wstring command_line = L"\"" + executable + L"\"";
         if (!CreateProcessW(executable.c_str(), command_line.data(), nullptr, nullptr, TRUE,
-                            0, nullptr, nullptr, &startup, &process)) {
+                            CREATE_NO_WINDOW, nullptr, nullptr, &startup, &process)) {
             throw std::runtime_error(windows_error("CreateProcessW"));
         }
         Handle process_handle(process.hProcess);
         Handle thread_handle(process.hThread);
         input_read.reset();
-        null_output.reset();
+        output_write.reset();
+        // On any I/O exception terminate and reap the child before closing handles.
+        struct ChildGuard {
+            HANDLE process;
+            bool done=false;
+            ~ChildGuard() { if (!done) { TerminateProcess(process, 2); WaitForSingleObject(process, INFINITE); } }
+        } child{process_handle.get()};
 
         std::size_t written_total = 0;
         while (written_total < value.size()) {
@@ -140,7 +155,7 @@ private:
                            nullptr)) {
                 const DWORD error = GetLastError();
                 input_write.reset();
-                WaitForSingleObject(process_handle.get(), INFINITE);
+
                 SetLastError(error);
                 throw std::runtime_error(windows_error("WriteFile(oracle stdin)"));
             }
@@ -151,6 +166,18 @@ private:
         }
         input_write.reset();
 
+        std::string output;
+        char buffer[8192];
+        for (;;) {
+            DWORD count=0;
+            if (!ReadFile(output_read.get(), buffer, sizeof(buffer), &count, nullptr)) {
+                if (GetLastError()==ERROR_BROKEN_PIPE) break;
+                throw std::runtime_error(windows_error("ReadFile(oracle stdout)"));
+            }
+            if (!count) break;
+            output.append(buffer,count);
+        }
+        output_read.reset();
         if (WaitForSingleObject(process_handle.get(), INFINITE) != WAIT_OBJECT_0) {
             throw std::runtime_error(windows_error("WaitForSingleObject"));
         }
@@ -158,103 +185,77 @@ private:
         if (!GetExitCodeProcess(process_handle.get(), &exit_code)) {
             throw std::runtime_error(windows_error("GetExitCodeProcess"));
         }
-        if (exit_code == 0) {
-            return true;
-        }
-        if (exit_code == 1) {
-            return false;
-        }
-        throw std::runtime_error("oracle exited with unexpected code " +
-                                 std::to_string(exit_code));
+        child.done=true;
+        if (exit_code!=0)
+            throw std::runtime_error("oracle exited with unexpected code " + std::to_string(exit_code));
+        return output;
     }
 #else
-    bool accepts_posix(std::string_view value) const {
-        static const bool sigpipe_ignored = [] {
-            return signal(SIGPIPE, SIG_IGN) != SIG_ERR;
-        }();
-        if (!sigpipe_ignored) {
-            throw std::runtime_error("failed to ignore SIGPIPE for oracle writes");
-        }
-        int input_pipe[2];
-        if (pipe(input_pipe) != 0) {
-            throw std::runtime_error("pipe failed for oracle stdin");
-        }
-
-        posix_spawn_file_actions_t actions;
-        if (posix_spawn_file_actions_init(&actions) != 0) {
-            close(input_pipe[0]);
-            close(input_pipe[1]);
-            throw std::runtime_error("posix_spawn_file_actions_init failed");
-        }
-        const auto cleanup_actions = [&]() { posix_spawn_file_actions_destroy(&actions); };
-        int action_error = posix_spawn_file_actions_adddup2(&actions, input_pipe[0], STDIN_FILENO);
-        action_error = action_error == 0
-                           ? posix_spawn_file_actions_addopen(&actions, STDOUT_FILENO, "/dev/null",
-                                                             O_WRONLY, 0)
-                           : action_error;
-        action_error = action_error == 0
-                           ? posix_spawn_file_actions_addclose(&actions, input_pipe[1])
-                           : action_error;
-        if (action_error != 0) {
-            cleanup_actions();
-            close(input_pipe[0]);
-            close(input_pipe[1]);
-            throw std::runtime_error("failed to configure posix_spawn file actions");
-        }
-
-        const std::string executable = executable_.string();
-        char* argv[] = {const_cast<char*>(executable.c_str()), nullptr};
+    std::string accepts_posix(std::string_view value) const {
+        static const bool sigpipe_ignored = signal(SIGPIPE, SIG_IGN) != SIG_ERR;
+        if (!sigpipe_ignored) throw std::runtime_error("failed to ignore SIGPIPE");
+        struct Pipe {
+            int fd[2]{-1,-1};
+            Pipe() { if (pipe(fd)!=0) throw std::runtime_error("oracle pipe failed"); }
+            void reset(int i) { if (fd[i]>=0) { close(fd[i]); fd[i]=-1; } }
+            ~Pipe() { reset(0); reset(1); }
+        } input, output;
+        struct Actions {
+            posix_spawn_file_actions_t value;
+            Actions() { if (posix_spawn_file_actions_init(&value)!=0) throw std::runtime_error("spawn actions init failed"); }
+            ~Actions() { posix_spawn_file_actions_destroy(&value); }
+        } actions;
+        const auto check=[](int code) { if (code) throw std::runtime_error("spawn action failed"); };
+        check(posix_spawn_file_actions_adddup2(&actions.value,input.fd[0],STDIN_FILENO));
+        check(posix_spawn_file_actions_adddup2(&actions.value,output.fd[1],STDOUT_FILENO));
+        for (int fd:{input.fd[0],input.fd[1],output.fd[0],output.fd[1]})
+            if (fd!=STDIN_FILENO && fd!=STDOUT_FILENO)
+                check(posix_spawn_file_actions_addclose(&actions.value,fd));
+        const auto executable=executable_.string();
+        char* argv[]={const_cast<char*>(executable.c_str()),nullptr};
         pid_t pid{};
-        const int spawn_error =
-            posix_spawn(&pid, executable.c_str(), &actions, nullptr, argv, environ);
-        cleanup_actions();
-        close(input_pipe[0]);
-        if (spawn_error != 0) {
-            close(input_pipe[1]);
-            throw std::runtime_error("posix_spawn failed with error " +
-                                     std::to_string(spawn_error));
-        }
-
-        std::size_t written_total = 0;
-        while (written_total < value.size()) {
-            const ssize_t written =
-                write(input_pipe[1], value.data() + written_total, value.size() - written_total);
-            if (written < 0) {
-                close(input_pipe[1]);
-                waitpid(pid, nullptr, 0);
-                throw std::runtime_error("write failed for oracle stdin");
+        if (posix_spawn(&pid,executable.c_str(),&actions.value,nullptr,argv,environ)!=0)
+            throw std::runtime_error("oracle posix_spawn failed");
+        struct ChildGuard {
+            pid_t pid;
+            bool done=false;
+            ~ChildGuard() {
+                if (!done) { kill(pid,SIGKILL); while (waitpid(pid,nullptr,0)<0 && errno==EINTR) {} }
             }
-            if (written == 0) {
-                close(input_pipe[1]);
-                waitpid(pid, nullptr, 0);
-                throw std::runtime_error("zero-byte write to oracle stdin");
-            }
-            written_total += static_cast<std::size_t>(written);
+        } child{pid};
+        input.reset(0);
+        output.reset(1);
+        std::size_t offset=0;
+        while (offset<value.size()) {
+            const auto count=write(input.fd[1],value.data()+offset,
+                std::min<std::size_t>(value.size()-offset,65536));
+            if (count<0 && errno==EINTR) continue;
+            if (count<=0) throw std::runtime_error("oracle stdin write failed");
+            offset+=static_cast<std::size_t>(count);
         }
-        close(input_pipe[1]);
-
-        int status = 0;
-        if (waitpid(pid, &status, 0) < 0) {
-            throw std::runtime_error("waitpid failed for oracle");
+        input.reset(1);
+        std::string response;
+        char buffer[8192];
+        for (;;) {
+            const auto count=read(output.fd[0],buffer,sizeof(buffer));
+            if (count<0 && errno==EINTR) continue;
+            if (count<0) throw std::runtime_error("oracle stdout read failed");
+            if (!count) break;
+            response.append(buffer,static_cast<std::size_t>(count));
         }
-        if (!WIFEXITED(status)) {
-            throw std::runtime_error("oracle terminated without a normal exit");
-        }
-        const int exit_code = WEXITSTATUS(status);
-        if (exit_code == 0) {
-            return true;
-        }
-        if (exit_code == 1) {
-            return false;
-        }
-        throw std::runtime_error("oracle exited with unexpected code " +
-                                 std::to_string(exit_code));
+        output.reset(0);
+        int status{};
+        pid_t waited;
+        do { waited=waitpid(pid,&status,0); } while (waited<0 && errno==EINTR);
+        if (waited<0) throw std::runtime_error("oracle waitpid failed");
+        child.done=true;
+        if (!WIFEXITED(status) || WEXITSTATUS(status)!=0)
+            throw std::runtime_error("oracle exited unsuccessfully");
+        return response;
     }
 #endif
 
     std::filesystem::path executable_;
-    std::size_t max_calls_{};
-    std::size_t calls_{};
 };
 
 }  // namespace patchouli

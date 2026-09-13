@@ -19,7 +19,19 @@ inline std::string patchouli(const InputData& input,const Config& config,Oracle&
                              AlgorithmMeasurements* measurements=nullptr) {
     AlgorithmMeasurements local_measurements;
     if (!measurements) measurements=&local_measurements;
-    if (oracle.accepts(input.corrupt_string)) return input.corrupt_string;
+    const auto oracle_accepts=[&](const std::vector<std::string>& values) {
+        const auto started=std::chrono::steady_clock::now();
+        // Include process startup, stdin transfer, execution, wait and cleanup.
+        struct RecordTime {
+            AlgorithmMeasurements* measurements;
+            std::chrono::steady_clock::time_point started;
+            ~RecordTime() { measurements->oracle_execution_time_ns+=measurement_ns(started); }
+        } record{measurements,started};
+        auto result=oracle.accepts_batch(values);
+        if (result.size()!=values.size()) throw std::runtime_error("oracle result count mismatch");
+        return result;
+    };
+    if (oracle_accepts({input.corrupt_string}).front()) return input.corrupt_string;
     auto positives=input.positive_examples;
     std::sort(positives.begin(),positives.end());
     positives.erase(std::unique(positives.begin(),positives.end()),positives.end());
@@ -78,14 +90,17 @@ inline std::string patchouli(const InputData& input,const Config& config,Oracle&
             combined_time>=ngrams_time?combined_time-ngrams_time:0;
         if (repairs.empty())
             throw std::runtime_error("RSR produced no unseen repair candidates");
-        bool rejected=false;
-        for (const auto& repair:repairs) {
-            if (!known.insert(repair.value).second) continue;
-            if (oracle.accepts(repair.value)) return repair.value;
-            rejected=true;
-        }
-        if (!rejected)
+        std::vector<std::string> candidates;
+        std::set<std::string> seen;
+        for (const auto& repair:repairs)
+            if (!known.contains(repair.value) && seen.insert(repair.value).second)
+                candidates.push_back(repair.value);
+        if (candidates.empty())
             throw std::runtime_error("RSR produced no queryable repair candidates");
+        const auto accepted=oracle_accepts(candidates);
+        for (std::size_t i=0;i<candidates.size();++i)
+            if (accepted[i]) return candidates[i];
+        known.insert(candidates.begin(),candidates.end());
     }
     throw std::runtime_error("maximum repair-iteration limit exhausted");
 }

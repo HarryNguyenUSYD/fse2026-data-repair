@@ -16,8 +16,7 @@ int main() {
         const auto start = std::chrono::steady_clock::now();
         const std::uint64_t effective_seed = config.seed.value_or(
             (static_cast<std::uint64_t>(std::random_device{}()) << 32U) ^ std::random_device{}());
-        patchouli::ExternalOracle oracle(config.oracle_executable,
-                                       config.max_total_oracle_calls);
+        patchouli::ExternalOracle oracle(config.oracle_executable);
         patchouli::AlgorithmMeasurements measurements;
         const std::string repaired =
             patchouli::patchouli(input, config, oracle, &measurements);

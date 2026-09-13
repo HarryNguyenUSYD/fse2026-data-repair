@@ -1,4 +1,4 @@
-"""Run generated repair cases against all configured repair algorithms."""
+"""Run generated repair cases against Patchouli across batch sizes and n values."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import json
 import math
 import os
 import platform
-import re
+import copy
 import signal
 import statistics
 import subprocess
@@ -30,17 +30,9 @@ FORMATS = ("date", "time", "url", "isbn", "ipv4", "ipv6")
 EXE_SUFFIX = ".exe" if os.name == "nt" else ""
 EXECUTABLES = {
     "patchouli": BUILD / f"patchouli{EXE_SUFFIX}",
-    "betamax-old": BUILD / f"betamax-old{EXE_SUFFIX}",
-    "epsilonrepair": BUILD / f"epsilonrepair{EXE_SUFFIX}",
 }
 STDIN_VALIDATORS = {
     name: BUILD / f"validate_{name}{EXE_SUFFIX}" for name in FORMATS
-}
-FILE_VALIDATORS = {
-    name: BUILD / f"validate_old_{name}{EXE_SUFFIX}" for name in FORMATS
-}
-BOUNDARY_VALIDATORS = {
-    name: BUILD / f"boundary_validate_{name}{EXE_SUFFIX}" for name in FORMATS
 }
 RESULT_FIELDS = (
     "implementation",
@@ -63,7 +55,7 @@ RESULT_FIELDS = (
     "observed_edit_distance",
     "effective_seed",
     "total_execution_time_ns",
-    "rsr_execution_time_ns",
+    "rsr_execution_time_ns", "oracle_execution_time_ns",
     "edsm_execution_time_ns",
     "ngrams_execution_time_ns",
     "initial_state_merge_ns",
@@ -193,6 +185,23 @@ def n_configurations(config: dict[str, Any]) -> list[int]:
         raise ValueError("no patchouli n configurations configured")
     return n_values
 
+def batch_configurations(config: dict[str, Any]) -> list[int]:
+    settings = config["patchouli"]
+    if "ngrams_batch_size" in settings:
+        raise ValueError("use patchouli.ngrams_batch_sizes instead of ngrams_batch_size")
+    values = settings.get("ngrams_batch_sizes")
+    if (not isinstance(values, list) or not values
+            or any(type(value) is not int or (value != -1 and value < 1) for value in values)):
+        raise ValueError("ngrams_batch_sizes must be a nonempty list of positive integers or -1")
+    if len(set(values)) != len(values):
+        raise ValueError("ngrams_batch_sizes must not contain duplicates")
+    return list(values)
+
+
+def phase_label(batch: int, n: int) -> str:
+    return f"patchouli-batch-{batch}-n-{n}"
+
+
 def worker_count() -> int:
     configured = int(load_config()["workers"])
     if configured != -1:
@@ -212,8 +221,6 @@ def _ensure_binaries() -> None:
     paths = (
         *EXECUTABLES.values(),
         *STDIN_VALIDATORS.values(),
-        *FILE_VALIDATORS.values(),
-        *BOUNDARY_VALIDATORS.values(),
     )
     missing = [path for path in paths if not path.is_file()]
     if missing:
@@ -240,20 +247,23 @@ def _tail(text: str, lines: int = 10) -> str:
 def _validator_accepts(format_name: str, output: str) -> bool:
     completed = subprocess.run(
         [str(STDIN_VALIDATORS[format_name].resolve())],
-        input=output,
+        input=json.dumps([output]),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
         timeout=10,
         check=False,
     )
-    if completed.returncode not in (0, 1):
+    if completed.returncode != 0:
         detail = _tail(completed.stderr or completed.stdout, lines=3)
         suffix = f": {detail}" if detail else ""
         raise RuntimeError(
             f"scoring validator exited with code {completed.returncode}{suffix}"
         )
-    return completed.returncode == 0
+    verdicts = json.loads(completed.stdout)
+    if not isinstance(verdicts, list) or len(verdicts) != 1 or type(verdicts[0]) is not bool:
+        raise ValueError("scoring validator must return one boolean in a JSON array")
+    return verdicts[0]
 
 
 def _current_config(
@@ -270,49 +280,11 @@ def _current_config(
         },
         "limits": {
             "max_iterations": int(settings["max_iterations"]),
-            "max_total_oracle_calls": int(settings["max_total_oracle_calls"]),
             "max_states": int(settings["max_states"]),
             "max_queue_size": int(settings["max_queue_size"]),
             "max_rsr_candidates": int(settings["max_rsr_candidates"]),
         },
     }
-
-
-def _write_lines(path: Path, values: list[str]) -> None:
-    path.write_text("".join(value + "\n" for value in values), encoding="ascii")
-
-
-def _legacy_validator_command(validator: Path) -> str:
-    if os.name == "nt":
-        return f'\\"{validator.resolve().as_posix()}\\"'
-    return f'"{validator.resolve()}"'
-
-
-def _betamax_old_arguments(
-    case: dict[str, Any], suite_config: dict[str, Any],
-    positives: Path, negatives: Path, broken: Path,
-) -> list[str]:
-    settings = suite_config["betamax_old"]
-    seed = int(suite_config["seed"])
-    return [
-        str(EXECUTABLES["betamax-old"].resolve()),
-        "--positives", str(positives),
-        "--negatives", str(negatives),
-        "--category", str(case["category"]),
-        "--broken-file", str(broken),
-        "--oracle-validator",
-        _legacy_validator_command(FILE_VALIDATORS[case["format"]]),
-        "--mutations", "0",
-        "--mutations-seed", str(seed),
-        "--xover-pairs", str(settings["cross_merge_samples"]),
-        "--max-attempts", str(settings["max_iterations"]),
-        "--attempt-candidates", str(settings["batch_size"]),
-        "--max-cost", str(settings["max_cost"]),
-        "--max-candidates", str(settings["batch_size"]),
-        "--oracle-timeout-ms", str(settings["oracle_timeout_ms"]),
-        "--eq-disable-sampling",
-        "--seed", str(seed),
-    ]
 
 
 def _launch(
@@ -368,6 +340,7 @@ def execute_case(
     execution_time: int | str = ""
     peak_memory: int | str = ""
     effective_seed: int | str = ""
+    oracle_execution_time: int | str = ""
     rsr_execution_time: int | str = ""
     edsm_execution_time: int | str = ""
     ngrams_execution_time: int | str = ""
@@ -383,7 +356,6 @@ def execute_case(
     rsr_calls_with_multiple_candidates: int | str = ""
     rsr_enumeration_truncated: bool | str = ""
     rsr_iterations = ""
-    file_output: str | None = None
     error = ""
     try:
         with tempfile.TemporaryDirectory(prefix=f"{implementation}-") as directory:
@@ -406,43 +378,12 @@ def execute_case(
                     json.dumps(config_json, indent=2) + "\n", encoding="utf-8"
                 )
                 arguments = [str(EXECUTABLES["patchouli"].resolve())]
-            elif implementation == "betamax-old":
-                positives = working_directory / "positives.txt"
-                negatives = working_directory / "negatives.txt"
-                broken = working_directory / "broken.txt"
-                _write_lines(positives, case["positive_examples"])
-                _write_lines(negatives, case["negative_examples"])
-                with broken.open("w", encoding="ascii", newline="") as stream:
-                    stream.write(case["corrupt_string"])
-                arguments = _betamax_old_arguments(
-                    case, suite_config, positives, negatives, broken
-                )
-            elif implementation == "epsilonrepair":
-                broken = working_directory / "broken.txt"
-                repaired = working_directory / "repaired.txt"
-                with broken.open("w", encoding="ascii", newline="") as stream:
-                    stream.write(case["corrupt_string"])
-                arguments = [
-                    str(EXECUTABLES["epsilonrepair"].resolve()),
-                    _legacy_validator_command(
-                        BOUNDARY_VALIDATORS[case["format"]]
-                    ),
-                    str(broken),
-                    str(repaired),
-                ]
             else:
                 raise ValueError(f"unknown implementation: {implementation}")
 
             stdout, stderr, return_code, timed_out = _launch(
                 arguments, working_directory, timeout,
-                stdout_path=(
-                    working_directory / "stdout.log"
-                    if implementation == "epsilonrepair" else None
-                ),
             )
-            if implementation == "epsilonrepair" and repaired.is_file():
-                with repaired.open("r", encoding="ascii", newline="") as stream:
-                    file_output = stream.read()
 
         if timed_out:
             error = f"Algorithm exceeded {configured_timeout:g} seconds."
@@ -452,7 +393,7 @@ def execute_case(
             parsed = json.loads(stdout)
             required = {
                 "output_string", "effective_seed", "peak_memory_bytes",
-                "total_execution_time_ns", "rsr_execution_time_ns",
+                "total_execution_time_ns", "rsr_execution_time_ns", "oracle_execution_time_ns",
                 "edsm_execution_time_ns",
                 "ngrams_execution_time_ns", "initial_state_merge_ns",
                 "merge_replay_ns", "resumed_state_merge_ns",
@@ -473,7 +414,7 @@ def execute_case(
             if not isinstance(parsed["effective_seed"], int):
                 raise ValueError("patchouli effective_seed is not an integer")
             for field in (
-                "rsr_execution_time_ns",
+                "rsr_execution_time_ns", "oracle_execution_time_ns",
                 "edsm_execution_time_ns", "ngrams_execution_time_ns",
                 "initial_state_merge_ns", "merge_replay_ns",
                 "resumed_state_merge_ns", "candidate_copy_or_rollback_ns",
@@ -526,6 +467,7 @@ def execute_case(
             effective_seed = parsed["effective_seed"]
             execution_time = parsed["total_execution_time_ns"]
             peak_memory = parsed["peak_memory_bytes"]
+            oracle_execution_time = parsed["oracle_execution_time_ns"]
             rsr_execution_time = parsed["rsr_execution_time_ns"]
             edsm_execution_time = parsed["edsm_execution_time_ns"]
             ngrams_execution_time = parsed["ngrams_execution_time_ns"]
@@ -545,21 +487,6 @@ def execute_case(
             rsr_iterations = json.dumps(
                 parsed["rsr_iterations"], separators=(",", ":")
             )
-        elif implementation == "betamax-old":
-            output = stdout[:-1] if stdout.endswith("\n") else stdout
-            if output.endswith("\r"):
-                output = output[:-1]
-            if "\n" in output or "\r" in output:
-                raise ValueError("betaMax-old emitted more than one stdout line")
-        elif implementation == "epsilonrepair":
-            if file_output is None:
-                raise ValueError("epsilonrepair did not produce an output file")
-            output = file_output
-            match = re.search(
-                r"Number of required oracle runs: (\d+)", stdout
-            )
-            if match is not None:
-                total_iterations = int(match.group(1))
     except Exception as exception:
         error = f"{type(exception).__name__}: {exception}"
 
@@ -595,6 +522,7 @@ def execute_case(
         "observed_edit_distance": edit_distance(case["corrupt_string"], output),
         "effective_seed": effective_seed,
         "total_execution_time_ns": execution_time,
+        "oracle_execution_time_ns": oracle_execution_time,
         "rsr_execution_time_ns": rsr_execution_time,
         "edsm_execution_time_ns": edsm_execution_time,
         "ngrams_execution_time_ns": ngrams_execution_time,
@@ -631,7 +559,7 @@ def _run_phase(
     timer_started: float,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any] | None] = [None] * len(cases)
-    label = implementation if n is None else f"{implementation}-n-{n}"
+    label = phase_label(config["patchouli"]["ngrams_batch_size"], n)
     print(f"{label}: {len(cases)} cases, {workers} workers", flush=True)
     progress = ProgressReporter(
         label, len(cases), total_executions, total_offset, timer_started
@@ -679,7 +607,7 @@ def _summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
         for row in rows
     ]
     measurement_fields = (
-        "rsr_execution_time_ns",
+        "rsr_execution_time_ns", "oracle_execution_time_ns",
         "edsm_execution_time_ns", "ngrams_execution_time_ns",
         "initial_state_merge_ns", "merge_replay_ns",
         "resumed_state_merge_ns", "candidate_copy_or_rollback_ns",
@@ -796,6 +724,7 @@ def run_benchmark(
         raise ValueError("workers must be at least 1")
     config = load_config()
     n_values = n_configurations(config)
+    batch_values = batch_configurations(config)
     _ensure_binaries()
     cases = load_cases()
     if case_limit is not None:
@@ -805,42 +734,28 @@ def run_benchmark(
     started = time.perf_counter()
     timer_started = time.monotonic()
 
-    total_executions = len(cases) * (len(n_values) + 2)
+    total_executions = len(cases) * (len(n_values) * len(batch_values))
     all_rows: list[dict[str, Any]] = []
     summaries: dict[str, Any] = {}
     total_offset = 0
-    for n in n_values:
-        label = f"patchouli-n-{n}"
-        rows = _run_phase(
-            "patchouli", n, cases, config, workers,
-            total_offset=total_offset, total_executions=total_executions,
-            timer_started=timer_started,
-        )
-        all_rows.extend(rows)
-        summaries[label] = {
-            "n": n,
-            "max_rsr_candidates": int(config["patchouli"]["max_rsr_candidates"]),
-            "ngrams_batch_size": int(config["patchouli"]["ngrams_batch_size"]),
-            **_summary(rows),
-        }
-        total_offset += len(cases)
-
-    betamax_rows = _run_phase(
-        "betamax-old", None, cases, config, workers,
-        total_offset=total_offset, total_executions=total_executions,
-        timer_started=timer_started,
-    )
-    all_rows.extend(betamax_rows)
-    summaries["betamax-old"] = _summary(betamax_rows)
-    total_offset += len(cases)
-
-    epsilonrepair_rows = _run_phase(
-        "epsilonrepair", None, cases, config, workers,
-        total_offset=total_offset, total_executions=total_executions,
-        timer_started=timer_started,
-    )
-    all_rows.extend(epsilonrepair_rows)
-    summaries["epsilonrepair"] = _summary(epsilonrepair_rows)
+    for batch in batch_values:
+        for n in n_values:
+            phase_config = copy.deepcopy(config)
+            phase_config["patchouli"]["ngrams_batch_size"] = batch
+            label = phase_label(batch, n)
+            rows = _run_phase(
+                "patchouli", n, cases, phase_config, workers,
+                total_offset=total_offset, total_executions=total_executions,
+                timer_started=timer_started,
+            )
+            all_rows.extend(rows)
+            summaries[label] = {
+                "n": n,
+                "max_rsr_candidates": int(config["patchouli"]["max_rsr_candidates"]),
+                "ngrams_batch_size": batch,
+                **_summary(rows),
+            }
+            total_offset += len(cases)
 
     results_path = RESULTS / f"{result_stem}.csv"
     summary_path = RESULTS / f"{result_stem}-summary.json"
@@ -851,7 +766,9 @@ def run_benchmark(
         "case_timeout_seconds": config["case_timeout_seconds"],
         "n_configurations": len(n_values),
         "base_cases": len(cases),
-        "implementations_per_case": len(n_values) + 2,
+        "implementations_per_case": len(n_values) * len(batch_values),
+        "configurations_per_case": len(n_values) * len(batch_values),
+        "batch_configurations": len(batch_values),
         "total_case_runs": total_executions,
         "environment": _environment_metadata(),
         "suite_config": config,

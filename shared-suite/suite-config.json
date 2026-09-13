@@ -7,31 +7,56 @@
   "d_min": 1,
   "d_max": 5,
   "string_lengths": {
-    "date": {"min": 10, "max": 10},
-    "time": {"min": 8, "max": 8},
-    "isbn": {"min": 13, "max": 13},
-    "ipv4": {"min": 11, "max": 15},
-    "ipv6": {"min": 21, "max": 32},
-    "url": {"min": 17, "max": 58}
+    "date": {
+      "min": 10,
+      "max": 10
+    },
+    "time": {
+      "min": 8,
+      "max": 8
+    },
+    "isbn": {
+      "min": 13,
+      "max": 13
+    },
+    "ipv4": {
+      "min": 11,
+      "max": 15
+    },
+    "ipv6": {
+      "min": 21,
+      "max": 32
+    },
+    "url": {
+      "min": 17,
+      "max": 58
+    }
   },
   "seed": 0,
   "workers": -1,
   "case_timeout_seconds": 300,
   "patchouli": {
-    "n_values": [0, 1, 2, 3, 4, 5],
-    "ngrams_batch_size": 1,
+    "n_values": [
+      5
+    ],
     "max_candidate_length": -1,
     "max_iterations": -1,
-    "max_total_oracle_calls": -1,
     "max_states": -1,
     "max_queue_size": -1,
-    "max_rsr_candidates": -1
-  },
-  "betamax_old": {
-    "cross_merge_samples": 1,
-    "batch_size": 1,
-    "max_iterations": -1,
-    "max_cost": -1,
-    "oracle_timeout_ms": -1
+    "max_rsr_candidates": -1,
+    "ngrams_batch_sizes": [
+      1,
+      2,
+      4,
+      8,
+      16,
+      24,
+      32,
+      40,
+      48,
+      56,
+      64,
+      -1
+    ]
   }
 }

@@ -25,7 +25,6 @@ struct Config {
     std::size_t ngrams_batch_size{1};
     std::size_t max_candidate_length{};
     std::size_t max_iterations{};
-    std::size_t max_total_oracle_calls{};
     std::size_t max_states{};
     std::size_t max_queue_size{};
     std::size_t max_rsr_candidates{};
@@ -52,6 +51,7 @@ struct RsrIterationMeasurement {
 
 struct AlgorithmMeasurements {
     std::uint64_t rsr_execution_time_ns{};
+    std::uint64_t oracle_execution_time_ns{};
     std::uint64_t edsm_execution_time_ns{};
     std::uint64_t ngrams_execution_time_ns{};
     std::uint64_t initial_state_merge_ns{};

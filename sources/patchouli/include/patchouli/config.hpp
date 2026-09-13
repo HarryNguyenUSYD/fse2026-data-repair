@@ -45,7 +45,6 @@ inline Config parse_config_value(const nlohmann::json& root) {
         ? boundary_value<std::size_t>(repair,"max_candidate_length","config.repair")
         : std::numeric_limits<std::size_t>::max();
     r.max_iterations=boundary_value<std::size_t>(limits,"max_iterations","config.limits");
-    r.max_total_oracle_calls=boundary_value<std::size_t>(limits,"max_total_oracle_calls","config.limits");
     r.max_states=boundary_value<std::size_t>(limits,"max_states","config.limits");
     r.max_queue_size=limits.contains("max_queue_size")
         ? boundary_value<std::size_t>(limits,"max_queue_size","config.limits")
@@ -55,7 +54,7 @@ inline Config parse_config_value(const nlohmann::json& root) {
         : std::numeric_limits<std::size_t>::max();
     if (!r.ngrams_batch_size ||
         !r.max_candidate_length || !r.max_iterations ||
-        !r.max_total_oracle_calls || !r.max_states || !r.max_queue_size ||
+        !r.max_states || !r.max_queue_size ||
         !r.max_rsr_candidates)
         throw std::runtime_error("configured counts and resource limits must be positive or -1 where supported");
     return r;

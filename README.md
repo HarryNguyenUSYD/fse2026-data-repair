@@ -1,125 +1,123 @@
-# fse2026-new-test
+# Patchouli batch-size benchmark
 
-Self-contained benchmark comparing patchouli All-Min, the legacy `betamax-old`
-implementation and epsilonrepair on the same deterministic
-repair cases. The six formats are date, time, URL, ISBN, IPv4, and IPv6. Epsilonrepair uses
-tri-state boundary validators: exit status 0 means a complete valid input, 1
-means an invalid prefix, and 255 means an incomplete valid prefix.
+This directory is self-contained: copy it anywhere to build and run it. It bundles
+Patchouli, its JSON dependency and tests, six stdin validators, the harness, and
+the exact 600 cases from the original suite. It requires Python 3.9 or newer,
+a C++20 compiler, and Make (or CMake 3.20 or newer). Windows with MSYS2 UCRT64,
+Linux, and macOS are supported.
 
-Generation is controlled by `shared-suite/suite-config.json`. `N` is the base
-case count per corruption level and is divided evenly among the six formats.
-The generator produces `N` cases at every edit distance from `d_min` through
-`d_max` (1-5 by default). Each entry under `string_lengths` independently
-controls the valid strings generated for that data type.
+## Experiment
 
-## Configurations
+`shared-suite/suite-config.json` specifies batch sizes `[1, 2, 4, 8, -1]`.
+For each batch size, the runner completes n = 0, 1, 2, 3, 4, 5 in order before
+starting the next batch. Each phase runs all 600 cases; cases within a phase
+run concurrently. The full benchmark has 30 phases and 18,000 case runs.
 
-patchouli uses EDSM to rank all RPNI red/blue-fringe merge candidates directly,
-without k-tails filtering. It runs the configured n sweep:
+Patchouli enumerates unique minimum-edit-cost candidates, scores and sorts them,
+and retains the top `ngrams_batch_size` candidates, or all available candidates
+when fewer exist. `-1` retains the entire sorted list. Each iteration submits all unseen retained candidates in one oracle process
+and selects the first accepted repair in their existing ranked order. For n = 0, scores are tied and existing deterministic
+tie-breaking still applies.
 
-```text
-n: 0, 1, 2, 3, 4, 5
-ngrams_batch_size: 1
-max_rsr_candidates: -1
-```
-
-For every repair iteration, patchouli runs RSR once and exhaustively enumerates
-all unique candidates at the minimum edit cost. It then ranks those candidates
-with the n-gram model and queries the single highest-ranked candidate. The
-`max_rsr_candidates: -1` setting leaves enumeration uncapped. Timeouts and the
-other resource limits can still interrupt an execution; the CSV and summary
-diagnostics distinguish complete enumeration from truncation.
-
-All patchouli resource limits are unbounded. `betamax-old` runs with unbounded
-repair attempts, edit cost, and per-oracle timeout, and uses a candidate batch
-size of 1 (`--attempt-candidates 1` and `--max-candidates 1`); mutation and
-equivalence-query sampling are disabled. patchouli and `betamax-old` use seed
-0. Every implementation has a 600-second outer timeout; epsilonrepair is
-deterministic and does not expose a random seed.
-
-There are six patchouli n configurations, one `betamax-old` configuration,
-and one `epsilonrepair` configuration:
-
-```text
-120 cases per level x 5 levels = 600 test cases
-600 test cases x 8 configurations = 4800 test-case runs
-```
-
-Each configuration runs as a separate phase. Within each phase, `workers: -1`
-uses every CPU allowed by process affinity, falling back to operating-system
-logical CPU count.
+All other settings match the original configuration: seed 0, workers -1
+(process affinity where available, otherwise logical CPU count), a 300-second
+timeout per case, and unbounded Patchouli resource limits. Training examples,
+corruptions, scoring validators, and measurement/summary semantics are preserved.
 
 ## Run
 
-Requirements are a C++20 compiler, Make, Python 3.9 or newer, and a POSIX
-environment. Epsilonrepair uses `/tmp`, `mkstemp`, POSIX process-status APIs,
-and a shell command for each oracle invocation, so it must be run on Linux,
-macOS, or WSL rather than as a native Windows executable.
+From this directory, with compiler, Python, and Make on PATH:
 
 ```sh
+make -j4 all
+make check
+make smoke
 make test
 ```
 
-For a one-base-case validation run across all configurations (8 runs):
+`make check` runs Python harness regressions and C++ tests with assertions enabled.
+`make smoke` runs the first bundled case across all 30 configurations.
+`make test` launches the full 18,000-run benchmark. Neither command regenerates
+cases. `make generate` explicitly regenerates them; this is unnecessary for the
+bundled experiment and can invalidate the recorded case hash.
+
+Equivalent CMake workflow (use Debug to enable assertions throughout C++ tests):
 
 ```sh
-make smoke
-```
-
-The equivalent CMake workflow is:
-
-```sh
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
+cmake --build build --config Debug --parallel
+ctest --test-dir build -C Debug --output-on-failure
+python3 -m unittest test_runner_support.py
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build --parallel
+cmake --build build --config Release --parallel
 python3 run_smoke_tests.py
+python3 run_tests.py
 ```
 
-Results are written under `results/`:
+On Windows, use `python` instead of `python3` if appropriate. CMake's executables
+must be in this directory's `build/`, as shown above. In an MSYS2 UCRT64 shell,
+`make` uses its available Python and g++ toolchain.
 
-- `benchmark[-smoke].csv`: long-form results for every implementation/configuration.
-- `benchmark[-smoke]-summary.json`: aggregate results for each patchouli n value,
-  `betamax-old` and `epsilonrepair`, plus base-case and total-run counts. Measurement totals
-  cover successful, non-error cases only. Failed repair edit distances count as
-  infinite; strict JSON represents an infinite median as `null` with
-  `median_observed_edit_distance_is_infinite: true`. Wall-time medians count
-  timeouts and errors as infinite in the same way; their JSON flag is
-  `median_wall_time_seconds_is_infinite`. Means are not reported.
-- patchouli rows also contain per-RSR-call candidate counts, minimum edit costs,
-  n-gram retention counts, and enumeration-completeness flags. Their summaries
-  aggregate calls that returned multiple minimum-cost candidates and report
-  whether all successful enumerations were complete.
+## Results and verification
 
-The patchouli executable is `build/patchouli`, its source is under
-`sources/patchouli`, and its suite configuration key is `patchouli`.
-Result labels are `patchouli-n-0` through `patchouli-n-5`; CSVs omit `k`
-and k-tails timing fields. Summaries report `n_configurations`.
-Obsolete `state_merging.k` and `patchouli.k_values` settings are rejected.
+Results stay in this directory's `results/`:
 
-Historical 300-second results and build artifacts are preserved outside this
-suite under `../benchmark-archive/k-test-suite/`. New runs write fresh results
-under this suite's `results/` directory.
+- `benchmark.csv` and `benchmark-summary.json` for the full experiment.
+- `benchmark-smoke.csv` and `benchmark-smoke-summary.json` for smoke runs.
 
-No implementation receives the expected regex, hidden valid source, or true
-edit distance. The legacy adapter writes positive, negative, and broken string
-files and uses filename-based validators. Epsilonrepair receives only the
-broken string and its tri-state boundary oracle. Hidden scoring
-fields are used only by the harness after execution. Final accuracy is checked
-by the same compiled validator implementation used elsewhere in the benchmark,
-not by the descriptive regex stored in each case.
+CSV rows retain `implementation: patchouli`, numeric `n` and `ngrams_batch_size`,
+and existing timing, accuracy, timeout, memory, and RSR diagnostics. Progress and
+summary groups use `patchouli-batch-{batch}-n-{n}` (including `batch--1`).
+Summaries report six n configurations, five batch configurations, and 30
+configurations per case. The retained `implementations_per_case` field also
+counts the 30 configurations for compatibility with the original summary shape.
 
-## Oracle rules
+Measurement totals include successful non-error cases only. Failed edit-distance
+and wall-time medians preserve the original infinity handling: JSON uses `null`
+and an explicit `*_is_infinite` flag. RSR summaries retain enumeration-completeness
+and candidate-retention diagnostics.
 
-The C++ sources in `validators/` match the repository's original validators.
-`validator.cpp` provides stdin and file validation; `boundary_validator.cpp`
-provides epsilonrepair's tri-state prefix interface.
+`oracle_execution_time_ns` records cumulative wall time across all oracle calls
+made by Patchouli for a case, including the initial corrupt-string check and
+accepted or rejected repair candidates. A steady clock measures each complete
+call, including process startup, stdin transfer, execution, waiting for exit,
+and cleanup. It excludes the harness's separate final-output validation.
+The value is emitted in Patchouli JSON and each benchmark CSV row, and summed
+per batch/n configuration under `successful_case_subalgorithm_total_time_ns`.
+As with other timings, killed/failed processes without a result have a blank
+CSV value and are excluded from summary totals. Existing result files must be
+regenerated to contain this measurement; it cannot be recovered retrospectively.
 
-Membership checks syntax only: date and time shapes, ISBN digit/separator
-structure, four IPv4 digit groups, eight IPv6 hexadecimal groups, and the
-original URL regular expression. Calendar validity, time ranges, ISBN checksums,
-and IPv4 numeric ranges are not checked. Status 255 means the input can be
-extended to match the format.
+The regression tests verify the bundled case count and SHA-256 against
+`shared-suite/test-cases/test-cases.sha256`, phase order, batch/n propagation,
+configuration isolation, timeout handling, and CSV/summary counts. C++ tests
+cover sorted candidate prefixes and unlimited retention. No parent-directory
+files, binaries, configuration, or results are required.
 
-The generator uses the same syntax rules to label examples and corruptions.
-Regenerate cases with `python3 shared-suite/generate_cases.py`.
+## Batched oracle protocol
 
-Run harness regression tests with `python3 -m unittest test_runner_support.py`.
+All six validators read one JSON array of strings from stdin until EOF, then
+write one JSON array of booleans to stdout in the same order. For example,
+`validate_ipv4` maps `["192.168.0.1","invalid"]` to `[true,false]`.
+Empty arrays return `[]`; duplicate strings retain separate result positions.
+Exit code 0 means the request was processed successfully, even if all entries
+are false. Malformed requests and execution errors return nonzero exit codes.
+The previous raw-string/exit-code verdict interface is replaced; rebuild both
+Patchouli and the validators together. Format acceptance rules are unchanged.
+
+The oracle API is `accepts_batch(const std::vector<std::string>&)`, returning
+`std::vector<bool>`. The initial input and harness final validation use singleton
+lists. Empty oracle lists do not spawn a process. Each repair iteration sends
+one complete retained list (including unlimited retention); all entries are
+validated, even after an accepted entry. Only when all are rejected are they
+added to the negative examples. There is no oracle-call budget setting.
+The existing case timeout and separate harness validation timeout still apply.
+
+Oracle wall time includes JSON serialization/parsing and the full subprocess
+lifetime. Existing timing CSV columns and summary totals remain unchanged.
+Batching can change runtime and timeout outcomes; rerun benchmarks for new
+measurements. Recorded results and generated cases are not migrated.
+
+`make check` runs harness, validator protocol, large-payload oracle integration,
+and C++ algorithm tests. CMake/CTest runs the C++ and oracle integration tests;
+run `python -m unittest test_runner_support.py` for the harness checks.
