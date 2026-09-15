@@ -105,24 +105,30 @@ int main(int argc, char** argv) {
     else if (name.starts_with(prefix)) name.erase(0, prefix.size());
     else return 2;
 
+    const auto accepts = [&](const std::string& value) {
+        if (name == "date") return is_date(value);
+        if (name == "time") return is_time(value);
+        if (name == "url") return is_url(value);
+        if (name == "isbn") return is_isbn(value);
+        if (name == "ipv4") return is_ipv4(value);
+        if (name == "ipv6") return is_ipv6(value);
+        throw std::runtime_error("unknown validator");
+    };
+
+#if defined(VALIDATOR_FILE_INPUT)
+    return accepts(input) ? 0 : 1;
+#else
     const auto values = nlohmann::json::parse(input);
     if (!values.is_array()) throw std::runtime_error("expected a JSON string array");
     auto result = nlohmann::json::array();
     for (const auto& item : values) {
         if (!item.is_string()) throw std::runtime_error("expected string array entries");
         const auto& value = item.get_ref<const std::string&>();
-        bool accepted = false;
-        if (name == "date") accepted = is_date(value);
-        else if (name == "time") accepted = is_time(value);
-        else if (name == "url") accepted = is_url(value);
-        else if (name == "isbn") accepted = is_isbn(value);
-        else if (name == "ipv4") accepted = is_ipv4(value);
-        else if (name == "ipv6") accepted = is_ipv6(value);
-        else throw std::runtime_error("unknown validator");
-        result.push_back(accepted);
+        result.push_back(accepts(value));
     }
     std::cout << result.dump() << '\n';
     return std::cout ? 0 : 2;
+#endif
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 2;

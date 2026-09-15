@@ -37,7 +37,7 @@
   "case_timeout_seconds": 300,
   "patchouli": {
     "n_values": [
-      5
+      2
     ],
     "max_candidate_length": -1,
     "max_iterations": -1,
@@ -58,5 +58,12 @@
       64,
       -1
     ]
+  },
+  "betamax": {
+    "cross_merge_samples": 1,
+    "batch_size": 1,
+    "max_iterations": -1,
+    "max_cost": -1,
+    "oracle_timeout_ms": -1
   }
 }

@@ -56,26 +56,30 @@ class RunnerTests(unittest.TestCase):
                 self.assertEqual(row["timed_out"], 1)
                 self.assertEqual(row["accuracy"], 0)
 
-    def test_only_patchouli_and_stdin_validators_required(self):
-        self.assertEqual(list(runner.EXECUTABLES), ["patchouli"])
+    def test_patchouli_run_only_requires_patchouli_and_stdin_validators(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            executables = {"patchouli": root / "patchouli"}
+            executables = {
+                name: root / name for name in ("patchouli", "betamax", "erepair")
+            }
             stdin = {name: root / f"validate_{name}" for name in runner.FORMATS}
-            paths = [*executables.values(), *stdin.values()]
+            paths = [executables["patchouli"], *stdin.values()]
             for path in paths:
                 path.touch()
             with patch.object(runner, "EXECUTABLES", executables), patch.object(runner, "STDIN_VALIDATORS", stdin):
-                runner._ensure_binaries()
+                runner._ensure_binaries(("patchouli",))
                 for path in paths:
                     path.unlink()
                     with self.assertRaises(FileNotFoundError):
-                        runner._ensure_binaries()
+                        runner._ensure_binaries(("patchouli",))
                     path.touch()
 
     def test_batch_values(self):
         config = runner.load_config()
-        self.assertEqual(runner.batch_configurations(config), [1, 2, 4, 8, -1])
+        self.assertEqual(
+            runner.batch_configurations(config),
+            config["patchouli"]["ngrams_batch_sizes"],
+        )
         for values in ([], [0], [-2], [1, 1], [True], [1.5], ["2"], None, 1):
             with self.subTest(values=values):
                 config["patchouli"]["ngrams_batch_sizes"] = values
@@ -90,7 +94,7 @@ class RunnerTests(unittest.TestCase):
         for batch in (1, 2, 4, 8, -1):
             for n in range(6):
                 self.config["patchouli"]["ngrams_batch_size"] = batch
-                def launch(arguments, directory, timeout):
+                def launch(arguments, directory, timeout, stdout_path=None):
                     config = json.loads((directory / "config.json").read_text())
                     self.assertEqual(config["repair"]["ngrams_batch_size"], batch)
                     self.assertEqual(config["repair"]["n"], n)
@@ -128,6 +132,7 @@ class RunnerTests(unittest.TestCase):
             "peak_memory_bytes": 100,
             "total_execution_time_ns": 100,
             "rsr_execution_time_ns": 10,
+            "oracle_total_calls": 2,
             "oracle_execution_time_ns": 37,
             "edsm_execution_time_ns": 10,
             "ngrams_execution_time_ns": 10,
@@ -162,6 +167,8 @@ class RunnerTests(unittest.TestCase):
         self.assertNotIn("ktails_execution_time_ns", row)
         times = runner._summary([row])["successful_case_subalgorithm_total_time_ns"]
         self.assertEqual(times["rsr_execution_time_ns"], 10)
+        self.assertEqual(row["oracle_total_calls"], 2)
+        self.assertEqual(runner._summary([row])["successful_case_total_oracle_calls"], 2)
         self.assertEqual(row["oracle_execution_time_ns"], 37)
         self.assertEqual(times["oracle_execution_time_ns"], 37)
         self.assertNotIn("ktails_execution_time_ns", times)
@@ -189,6 +196,41 @@ class RunnerTests(unittest.TestCase):
         self.assertIn("unexpected JSON shape", self.execute_mock_result(result)["error"])
         result["oracle_execution_time_ns"] = "bad"
         self.assertIn("not an integer", self.execute_mock_result(result)["error"])
+
+    def test_oracle_call_count_required_and_validated(self):
+        result = self.patchouli_result()
+        del result["oracle_total_calls"]
+        self.assertIn("unexpected JSON shape", self.execute_mock_result(result)["error"])
+        result["oracle_total_calls"] = "bad"
+        self.assertIn("not an integer", self.execute_mock_result(result)["error"])
+
+    def test_betamax_oracle_metrics(self):
+        stderr = "ORACLE_METRICS total_calls=7 execution_time_ns=1234\n"
+        with patch.object(
+            runner, "_launch",
+            return_value=(self.case["valid_source"] + "\n", stderr, 0, False),
+        ), patch.object(runner, "_validator_accepts", return_value=True):
+            row = runner.execute_case("betamax", None, 0, self.case, self.config)
+        self.assertEqual(row["error"], "")
+        self.assertEqual(row["oracle_total_calls"], 7)
+        self.assertEqual(row["oracle_execution_time_ns"], 1234)
+
+    def test_erepair_oracle_metrics(self):
+        def launch(arguments, directory, timeout, stdout_path=None):
+            (directory / "repaired.txt").write_text(
+                self.case["valid_source"], encoding="ascii"
+            )
+            return (
+                "ORACLE_METRICS total_calls=9 execution_time_ns=5678\n",
+                "", 0, False,
+            )
+
+        with patch.object(runner, "_launch", side_effect=launch), \
+                patch.object(runner, "_validator_accepts", return_value=True):
+            row = runner.execute_case("erepair", None, 0, self.case, self.config)
+        self.assertEqual(row["error"], "")
+        self.assertEqual(row["oracle_total_calls"], 9)
+        self.assertEqual(row["oracle_execution_time_ns"], 5678)
 
     def test_result_validation_preserved(self):
         result = self.patchouli_result()
@@ -223,6 +265,7 @@ class RunnerTests(unittest.TestCase):
         original = runner.load_config()
         sweep_config = copy.deepcopy(original)
         sweep_config["patchouli"]["n_values"] = list(range(6))
+        sweep_config["patchouli"]["ngrams_batch_sizes"] = [1, 2, 4, 8, -1]
         for count in (1, 600):
             with self.subTest(count=count), tempfile.TemporaryDirectory() as directory:
                 observed = []

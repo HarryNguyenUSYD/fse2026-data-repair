@@ -1,10 +1,10 @@
 # Patchouli batch-size benchmark
 
 This directory is self-contained: copy it anywhere to build and run it. It bundles
-Patchouli, its JSON dependency and tests, six stdin validators, the harness, and
-the exact 600 cases from the original suite. It requires Python 3.9 or newer,
-a C++20 compiler, and Make (or CMake 3.20 or newer). Windows with MSYS2 UCRT64,
-Linux, and macOS are supported.
+Patchouli, betaMax, eRepair, validators, the harness, and the exact 600 cases
+from the original suite. It requires Python 3.9 or newer, a C++20 compiler, and
+Make (or CMake 3.20 or newer). Patchouli and betaMax support Windows, Linux, and
+macOS; eRepair must run in a POSIX environment.
 
 ## Experiment
 
@@ -33,13 +33,26 @@ make -j4 all
 make check
 make smoke
 make test
+# Run only one comparison algorithm:
+make test-patchouli
+make test-betamax
+make test-erepair
 ```
 
 `make check` runs Python harness regressions and C++ tests with assertions enabled.
-`make smoke` runs the first bundled case across all 30 configurations.
-`make test` launches the full 18,000-run benchmark. Neither command regenerates
-cases. `make generate` explicitly regenerates them; this is unnecessary for the
-bundled experiment and can invalidate the recorded case hash.
+`make smoke` runs the first bundled case across every configured Patchouli
+batch/n combination plus betaMax and eRepair. `make test` runs the same three
+algorithms over the full case set. Neither command regenerates cases. `make
+generate` explicitly regenerates them; this is unnecessary for the bundled
+experiment and can invalidate the recorded case hash.
+
+`make test-patchouli`, `make test-betamax`, and `make test-erepair` build and
+run only the named algorithm (plus its validators). The one-case checks are
+`make smoke-patchouli`, `make smoke-betamax`, and `make smoke-erepair`.
+Aggregate runs retain the existing `results/benchmark*` filenames. Independent
+runs write `results/patchouli*`, `results/betamax*`, or `results/erepair*`.
+eRepair requires a POSIX environment (Linux, macOS, or WSL) because its upstream
+implementation uses POSIX temporary-file and process APIs.
 
 Equivalent CMake workflow (use Debug to enable assertions throughout C++ tests):
 
@@ -77,13 +90,15 @@ and wall-time medians preserve the original infinity handling: JSON uses `null`
 and an explicit `*_is_infinite` flag. RSR summaries retain enumeration-completeness
 and candidate-retention diagnostics.
 
-`oracle_execution_time_ns` records cumulative wall time across all oracle calls
-made by Patchouli for a case, including the initial corrupt-string check and
-accepted or rejected repair candidates. A steady clock measures each complete
-call, including process startup, stdin transfer, execution, waiting for exit,
-and cleanup. It excludes the harness's separate final-output validation.
-The value is emitted in Patchouli JSON and each benchmark CSV row, and summed
-per batch/n configuration under `successful_case_subalgorithm_total_time_ns`.
+`oracle_total_calls` and `oracle_execution_time_ns` record, respectively, the
+number of oracle process calls and their cumulative wall time for each case.
+They are emitted for Patchouli, betaMax, and eRepair. Patchouli includes the
+initial corrupt-string check and accepted or rejected candidate batches. A
+steady clock measures the complete external-oracle invocation; Patchouli and
+betaMax also include their per-call input setup and cleanup. The measurements
+exclude the harness's separate final-output validation. CSV rows contain both fields;
+summaries expose `successful_case_total_oracle_calls` and sum oracle time under
+`successful_case_subalgorithm_total_time_ns.oracle_execution_time_ns`.
 As with other timings, killed/failed processes without a result have a blank
 CSV value and are excluded from summary totals. Existing result files must be
 regenerated to contain this measurement; it cannot be recovered retrospectively.

@@ -20,6 +20,7 @@ inline std::string patchouli(const InputData& input,const Config& config,Oracle&
     AlgorithmMeasurements local_measurements;
     if (!measurements) measurements=&local_measurements;
     const auto oracle_accepts=[&](const std::vector<std::string>& values) {
+        ++measurements->oracle_total_calls;
         const auto started=std::chrono::steady_clock::now();
         // Include process startup, stdin transfer, execution, wait and cleanup.
         struct RecordTime {

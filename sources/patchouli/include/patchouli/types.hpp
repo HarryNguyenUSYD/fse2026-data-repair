@@ -51,6 +51,7 @@ struct RsrIterationMeasurement {
 
 struct AlgorithmMeasurements {
     std::uint64_t rsr_execution_time_ns{};
+    std::uint64_t oracle_total_calls{};
     std::uint64_t oracle_execution_time_ns{};
     std::uint64_t edsm_execution_time_ns{};
     std::uint64_t ngrams_execution_time_ns{};

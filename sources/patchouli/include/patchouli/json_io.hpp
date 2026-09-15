@@ -111,6 +111,7 @@ inline std::string serialize_result(const ProgramResult& result) {
         {"peak_memory_bytes", result.peak_memory_bytes},
         {"total_execution_time_ns", result.total_execution_time_ns},
         {"rsr_execution_time_ns", result.measurements.rsr_execution_time_ns},
+        {"oracle_total_calls", result.measurements.oracle_total_calls},
         {"oracle_execution_time_ns", result.measurements.oracle_execution_time_ns},
         {"edsm_execution_time_ns", result.measurements.edsm_execution_time_ns},
         {"ngrams_execution_time_ns", result.measurements.ngrams_execution_time_ns},

@@ -8,6 +8,7 @@ import math
 import os
 import platform
 import copy
+import re
 import signal
 import statistics
 import subprocess
@@ -30,9 +31,17 @@ FORMATS = ("date", "time", "url", "isbn", "ipv4", "ipv6")
 EXE_SUFFIX = ".exe" if os.name == "nt" else ""
 EXECUTABLES = {
     "patchouli": BUILD / f"patchouli{EXE_SUFFIX}",
+    "betamax": BUILD / f"betamax{EXE_SUFFIX}",
+    "erepair": BUILD / f"erepair{EXE_SUFFIX}",
 }
 STDIN_VALIDATORS = {
     name: BUILD / f"validate_{name}{EXE_SUFFIX}" for name in FORMATS
+}
+FILE_VALIDATORS = {
+    name: BUILD / f"validate_old_{name}{EXE_SUFFIX}" for name in FORMATS
+}
+BOUNDARY_VALIDATORS = {
+    name: BUILD / f"boundary_validate_{name}{EXE_SUFFIX}" for name in FORMATS
 }
 RESULT_FIELDS = (
     "implementation",
@@ -55,7 +64,7 @@ RESULT_FIELDS = (
     "observed_edit_distance",
     "effective_seed",
     "total_execution_time_ns",
-    "rsr_execution_time_ns", "oracle_execution_time_ns",
+    "rsr_execution_time_ns", "oracle_total_calls", "oracle_execution_time_ns",
     "edsm_execution_time_ns",
     "ngrams_execution_time_ns",
     "initial_state_merge_ns",
@@ -217,11 +226,12 @@ def worker_count() -> int:
     return os.cpu_count() or 1
 
 
-def _ensure_binaries() -> None:
-    paths = (
-        *EXECUTABLES.values(),
-        *STDIN_VALIDATORS.values(),
-    )
+def _ensure_binaries(implementations: tuple[str, ...] = ("patchouli",)) -> None:
+    paths = [*(EXECUTABLES[name] for name in implementations), *STDIN_VALIDATORS.values()]
+    if "betamax" in implementations:
+        paths.extend(FILE_VALIDATORS.values())
+    if "erepair" in implementations:
+        paths.extend(BOUNDARY_VALIDATORS.values())
     missing = [path for path in paths if not path.is_file()]
     if missing:
         listing = "\n".join(f"  {path}" for path in missing)
@@ -287,6 +297,43 @@ def _current_config(
     }
 
 
+def _write_lines(path: Path, values: list[str]) -> None:
+    path.write_text("".join(value + "\n" for value in values), encoding="ascii")
+
+
+def _legacy_validator_command(validator: Path) -> str:
+    if os.name == "nt":
+        return f'\\"{validator.resolve().as_posix()}\\"'
+    return f'"{validator.resolve()}"'
+
+
+def _betamax_arguments(
+    case: dict[str, Any], suite_config: dict[str, Any],
+    positives: Path, negatives: Path, broken: Path,
+) -> list[str]:
+    settings = suite_config["betamax"]
+    seed = int(suite_config["seed"])
+    return [
+        str(EXECUTABLES["betamax"].resolve()),
+        "--positives", str(positives),
+        "--negatives", str(negatives),
+        "--category", str(case["category"]),
+        "--broken-file", str(broken),
+        "--oracle-validator",
+        _legacy_validator_command(FILE_VALIDATORS[case["format"]]),
+        "--mutations", "0",
+        "--mutations-seed", str(seed),
+        "--xover-pairs", str(settings["cross_merge_samples"]),
+        "--max-attempts", str(settings["max_iterations"]),
+        "--attempt-candidates", str(settings["batch_size"]),
+        "--max-cost", str(settings["max_cost"]),
+        "--max-candidates", str(settings["batch_size"]),
+        "--oracle-timeout-ms", str(settings["oracle_timeout_ms"]),
+        "--eq-disable-sampling",
+        "--seed", str(seed),
+    ]
+
+
 def _launch(
     arguments: list[str], working_directory: Path, timeout: float | None,
     stdout_path: Path | None = None,
@@ -340,6 +387,7 @@ def execute_case(
     execution_time: int | str = ""
     peak_memory: int | str = ""
     effective_seed: int | str = ""
+    oracle_total_calls: int | str = ""
     oracle_execution_time: int | str = ""
     rsr_execution_time: int | str = ""
     edsm_execution_time: int | str = ""
@@ -356,6 +404,7 @@ def execute_case(
     rsr_calls_with_multiple_candidates: int | str = ""
     rsr_enumeration_truncated: bool | str = ""
     rsr_iterations = ""
+    file_output: str | None = None
     error = ""
     try:
         with tempfile.TemporaryDirectory(prefix=f"{implementation}-") as directory:
@@ -378,12 +427,43 @@ def execute_case(
                     json.dumps(config_json, indent=2) + "\n", encoding="utf-8"
                 )
                 arguments = [str(EXECUTABLES["patchouli"].resolve())]
+            elif implementation == "betamax":
+                positives = working_directory / "positives.txt"
+                negatives = working_directory / "negatives.txt"
+                broken = working_directory / "broken.txt"
+                _write_lines(positives, case["positive_examples"])
+                _write_lines(negatives, case["negative_examples"])
+                with broken.open("w", encoding="ascii", newline="") as stream:
+                    stream.write(case["corrupt_string"])
+                arguments = _betamax_arguments(
+                    case, suite_config, positives, negatives, broken
+                )
+            elif implementation == "erepair":
+                broken = working_directory / "broken.txt"
+                repaired = working_directory / "repaired.txt"
+                with broken.open("w", encoding="ascii", newline="") as stream:
+                    stream.write(case["corrupt_string"])
+                arguments = [
+                    str(EXECUTABLES["erepair"].resolve()),
+                    _legacy_validator_command(
+                        BOUNDARY_VALIDATORS[case["format"]]
+                    ),
+                    str(broken),
+                    str(repaired),
+                ]
             else:
                 raise ValueError(f"unknown implementation: {implementation}")
 
             stdout, stderr, return_code, timed_out = _launch(
                 arguments, working_directory, timeout,
+                stdout_path=(
+                    working_directory / "stdout.log"
+                    if implementation == "erepair" else None
+                ),
             )
+            if implementation == "erepair" and repaired.is_file():
+                with repaired.open("r", encoding="ascii", newline="") as stream:
+                    file_output = stream.read()
 
         if timed_out:
             error = f"Algorithm exceeded {configured_timeout:g} seconds."
@@ -393,7 +473,8 @@ def execute_case(
             parsed = json.loads(stdout)
             required = {
                 "output_string", "effective_seed", "peak_memory_bytes",
-                "total_execution_time_ns", "rsr_execution_time_ns", "oracle_execution_time_ns",
+                "total_execution_time_ns", "rsr_execution_time_ns",
+                "oracle_total_calls", "oracle_execution_time_ns",
                 "edsm_execution_time_ns",
                 "ngrams_execution_time_ns", "initial_state_merge_ns",
                 "merge_replay_ns", "resumed_state_merge_ns",
@@ -414,7 +495,7 @@ def execute_case(
             if not isinstance(parsed["effective_seed"], int):
                 raise ValueError("patchouli effective_seed is not an integer")
             for field in (
-                "rsr_execution_time_ns", "oracle_execution_time_ns",
+                "rsr_execution_time_ns", "oracle_total_calls", "oracle_execution_time_ns",
                 "edsm_execution_time_ns", "ngrams_execution_time_ns",
                 "initial_state_merge_ns", "merge_replay_ns",
                 "resumed_state_merge_ns", "candidate_copy_or_rollback_ns",
@@ -467,6 +548,7 @@ def execute_case(
             effective_seed = parsed["effective_seed"]
             execution_time = parsed["total_execution_time_ns"]
             peak_memory = parsed["peak_memory_bytes"]
+            oracle_total_calls = parsed["oracle_total_calls"]
             oracle_execution_time = parsed["oracle_execution_time_ns"]
             rsr_execution_time = parsed["rsr_execution_time_ns"]
             edsm_execution_time = parsed["edsm_execution_time_ns"]
@@ -487,6 +569,33 @@ def execute_case(
             rsr_iterations = json.dumps(
                 parsed["rsr_iterations"], separators=(",", ":")
             )
+        elif implementation == "betamax":
+            output = stdout[:-1] if stdout.endswith("\n") else stdout
+            if output.endswith("\r"):
+                output = output[:-1]
+            if "\n" in output or "\r" in output:
+                raise ValueError("betaMax emitted more than one stdout line")
+            metrics = re.search(
+                r"ORACLE_METRICS total_calls=(\d+) execution_time_ns=(\d+)",
+                stderr,
+            )
+            if metrics is None:
+                raise ValueError("betaMax did not report oracle metrics")
+            oracle_total_calls = int(metrics.group(1))
+            oracle_execution_time = int(metrics.group(2))
+        elif implementation == "erepair":
+            if file_output is None:
+                raise ValueError("eRepair did not produce an output file")
+            output = file_output
+            metrics = re.search(
+                r"ORACLE_METRICS total_calls=(\d+) execution_time_ns=(\d+)",
+                stdout,
+            )
+            if metrics is None:
+                raise ValueError("eRepair did not report oracle metrics")
+            oracle_total_calls = int(metrics.group(1))
+            oracle_execution_time = int(metrics.group(2))
+            total_iterations = oracle_total_calls
     except Exception as exception:
         error = f"{type(exception).__name__}: {exception}"
 
@@ -522,6 +631,7 @@ def execute_case(
         "observed_edit_distance": edit_distance(case["corrupt_string"], output),
         "effective_seed": effective_seed,
         "total_execution_time_ns": execution_time,
+        "oracle_total_calls": oracle_total_calls,
         "oracle_execution_time_ns": oracle_execution_time,
         "rsr_execution_time_ns": rsr_execution_time,
         "edsm_execution_time_ns": edsm_execution_time,
@@ -559,7 +669,10 @@ def _run_phase(
     timer_started: float,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any] | None] = [None] * len(cases)
-    label = phase_label(config["patchouli"]["ngrams_batch_size"], n)
+    label = (
+        phase_label(config["patchouli"]["ngrams_batch_size"], n)
+        if implementation == "patchouli" else implementation
+    )
     print(f"{label}: {len(cases)} cases, {workers} workers", flush=True)
     progress = ProgressReporter(
         label, len(cases), total_executions, total_offset, timer_started
@@ -626,6 +739,11 @@ def _summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
         for row in observed
         if row["total_iterations"] != ""
     ]
+    oracle_call_samples = [
+        int(row["oracle_total_calls"])
+        for row in observed
+        if row["oracle_total_calls"] != ""
+    ]
     median_edit_distance = (
         statistics.median(edit_distances) if edit_distances else None
     )
@@ -648,6 +766,9 @@ def _summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "measurement_scope": "successful non-error cases only",
         "successful_case_total_iterations": (
             sum(iteration_samples) if iteration_samples else None
+        ),
+        "successful_case_total_oracle_calls": (
+            sum(oracle_call_samples) if oracle_call_samples else None
         ),
         "successful_case_subalgorithm_total_time_ns": measurement_totals,
         "outputs_in_positive_examples": sum(
@@ -719,13 +840,19 @@ def run_benchmark(
     workers: int,
     case_limit: int | None = None,
     result_stem: str = "benchmark",
+    implementations: tuple[str, ...] = ("patchouli",),
 ) -> None:
     if workers < 1:
         raise ValueError("workers must be at least 1")
+    if not implementations or len(set(implementations)) != len(implementations):
+        raise ValueError("implementations must be nonempty and unique")
+    unknown = set(implementations) - set(EXECUTABLES)
+    if unknown:
+        raise ValueError(f"unknown implementations: {sorted(unknown)}")
     config = load_config()
-    n_values = n_configurations(config)
-    batch_values = batch_configurations(config)
-    _ensure_binaries()
+    n_values = n_configurations(config) if "patchouli" in implementations else []
+    batch_values = batch_configurations(config) if "patchouli" in implementations else []
+    _ensure_binaries(implementations)
     cases = load_cases()
     if case_limit is not None:
         if case_limit < 1:
@@ -734,7 +861,12 @@ def run_benchmark(
     started = time.perf_counter()
     timer_started = time.monotonic()
 
-    total_executions = len(cases) * (len(n_values) * len(batch_values))
+    configurations_per_case = (
+        len(n_values) * len(batch_values)
+        + int("betamax" in implementations)
+        + int("erepair" in implementations)
+    )
+    total_executions = len(cases) * configurations_per_case
     all_rows: list[dict[str, Any]] = []
     summaries: dict[str, Any] = {}
     total_offset = 0
@@ -757,6 +889,18 @@ def run_benchmark(
             }
             total_offset += len(cases)
 
+    for implementation in ("betamax", "erepair"):
+        if implementation not in implementations:
+            continue
+        rows = _run_phase(
+            implementation, None, cases, config, workers,
+            total_offset=total_offset, total_executions=total_executions,
+            timer_started=timer_started,
+        )
+        all_rows.extend(rows)
+        summaries[implementation] = _summary(rows)
+        total_offset += len(cases)
+
     results_path = RESULTS / f"{result_stem}.csv"
     summary_path = RESULTS / f"{result_stem}-summary.json"
     _write_csv(results_path, RESULT_FIELDS, all_rows)
@@ -766,8 +910,8 @@ def run_benchmark(
         "case_timeout_seconds": config["case_timeout_seconds"],
         "n_configurations": len(n_values),
         "base_cases": len(cases),
-        "implementations_per_case": len(n_values) * len(batch_values),
-        "configurations_per_case": len(n_values) * len(batch_values),
+        "implementations_per_case": configurations_per_case,
+        "configurations_per_case": configurations_per_case,
         "batch_configurations": len(batch_values),
         "total_case_runs": total_executions,
         "environment": _environment_metadata(),
