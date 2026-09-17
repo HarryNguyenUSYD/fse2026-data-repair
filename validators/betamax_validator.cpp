@@ -1,7 +1,7 @@
-#include <nlohmann/json.hpp>
 #include <algorithm>
 #include <cctype>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <iterator>
 #include <regex>
@@ -84,38 +84,27 @@ bool is_url(const std::string& value) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    try {
     std::string input;
-    if (argc != 1) return 2;
-    input.assign(std::istreambuf_iterator<char>(std::cin), {});
+    if (argc != 2) return 2;
+    std::ifstream stream(argv[1], std::ios::binary);
+    if (!stream) return 2;
+    input.assign(std::istreambuf_iterator<char>(stream), {});
+    if (stream.bad()) return 2;
 
     std::string name = std::filesystem::path(argv[0]).stem().string();
+    constexpr std::string_view old_prefix = "validate_betamax_";
     constexpr std::string_view prefix = "validate_";
-    if (name.starts_with(prefix)) name.erase(0, prefix.size());
+    if (name.starts_with(old_prefix)) name.erase(0, old_prefix.size());
+    else if (name.starts_with(prefix)) name.erase(0, prefix.size());
     else return 2;
 
-    const auto accepts = [&](const std::string& value) {
-        if (name == "date") return is_date(value);
-        if (name == "time") return is_time(value);
-        if (name == "url") return is_url(value);
-        if (name == "isbn") return is_isbn(value);
-        if (name == "ipv4") return is_ipv4(value);
-        if (name == "ipv6") return is_ipv6(value);
-        throw std::runtime_error("unknown validator");
-    };
-
-    const auto values = nlohmann::json::parse(input);
-    if (!values.is_array()) throw std::runtime_error("expected a JSON string array");
-    auto result = nlohmann::json::array();
-    for (const auto& item : values) {
-        if (!item.is_string()) throw std::runtime_error("expected string array entries");
-        const auto& value = item.get_ref<const std::string&>();
-        result.push_back(accepts(value));
-    }
-    std::cout << result.dump() << '\n';
-    return std::cout ? 0 : 2;
-    } catch (const std::exception& error) {
-        std::cerr << error.what() << '\n';
-        return 2;
-    }
+    bool accepted = false;
+    if (name == "date") accepted = is_date(input);
+    else if (name == "time") accepted = is_time(input);
+    else if (name == "url") accepted = is_url(input);
+    else if (name == "isbn") accepted = is_isbn(input);
+    else if (name == "ipv4") accepted = is_ipv4(input);
+    else if (name == "ipv6") accepted = is_ipv6(input);
+    else return 2;
+    return accepted ? 0 : 1;
 }

@@ -215,6 +215,17 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(row["oracle_total_calls"], 7)
         self.assertEqual(row["oracle_execution_time_ns"], 1234)
 
+    def test_betamax_uses_dedicated_validator(self):
+        for name in runner.FORMATS:
+            case = dict(self.case, format=name)
+            arguments = runner._betamax_arguments(
+                case, self.config, Path('positives'), Path('negatives'), Path('broken')
+            )
+            command = arguments[arguments.index('--oracle-validator') + 1]
+            expected = runner.BUILD / f'validate_betamax_{name}{runner.EXE_SUFFIX}'
+            self.assertEqual(runner.FILE_VALIDATORS[name], expected)
+            self.assertEqual(command, runner._legacy_validator_command(expected))
+
     def test_erepair_oracle_metrics(self):
         def launch(arguments, directory, timeout, stdout_path=None):
             (directory / "repaired.txt").write_text(

@@ -15,6 +15,19 @@ VALID = {"date": "2026-09-12", "time": "12:34:56", "isbn": "123456789X",
          "ipv4": "192.168.0.1", "ipv6": "1:2:3:4:5:6:7:8", "url": "https://example.com"}
 
 class OracleIntegrationTests(unittest.TestCase):
+    def test_betamax_file_validator_exit_codes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            candidate = Path(directory) / 'candidate.txt'
+            for name, valid in VALID.items():
+                executable = BUILD / ('validate_betamax_' + name + SUFFIX)
+                for value, expected in ((valid, 0), ('invalid', 1), ('', 1)):
+                    candidate.write_text(value, encoding='ascii')
+                    p = self.run_process(executable, '', candidate)
+                    self.assertEqual(p.returncode, expected, (name, value, p.stderr))
+                    self.assertEqual(p.stdout, '')
+                self.assertEqual(self.run_process(executable, '').returncode, 2)
+                self.assertEqual(self.run_process(executable, '', Path(directory) / 'missing.txt').returncode, 2)
+
     def run_process(self, executable, payload, *args):
         return subprocess.run([str(executable), *map(str,args)], input=payload,
                               text=True, capture_output=True, timeout=30)

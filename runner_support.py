@@ -38,7 +38,7 @@ STDIN_VALIDATORS = {
     name: BUILD / f"validate_{name}{EXE_SUFFIX}" for name in FORMATS
 }
 FILE_VALIDATORS = {
-    name: BUILD / f"validate_old_{name}{EXE_SUFFIX}" for name in FORMATS
+    name: BUILD / f"validate_betamax_{name}{EXE_SUFFIX}" for name in FORMATS
 }
 BOUNDARY_VALIDATORS = {
     name: BUILD / f"boundary_validate_{name}{EXE_SUFFIX}" for name in FORMATS
