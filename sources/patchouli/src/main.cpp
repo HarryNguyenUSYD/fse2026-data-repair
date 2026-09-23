@@ -11,6 +11,7 @@
 
 int main() {
     try {
+        oracle_process::persist_metrics(0, 0, 0, 0);
         const patchouli::InputData input = patchouli::read_input_json("input.json");
         const patchouli::Config config = patchouli::read_config_json("config.json");
         const auto start = std::chrono::steady_clock::now();

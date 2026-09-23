@@ -20,14 +20,10 @@ inline std::string patchouli(const InputData& input,const Config& config,Oracle&
     AlgorithmMeasurements local_measurements;
     if (!measurements) measurements=&local_measurements;
     const auto oracle_accepts=[&](const std::vector<std::string>& values) {
-        ++measurements->oracle_total_calls;
-        const auto started=std::chrono::steady_clock::now();
-        // Include process startup, stdin transfer, execution, wait and cleanup.
-        struct RecordTime {
-            AlgorithmMeasurements* measurements;
-            std::chrono::steady_clock::time_point started;
-            ~RecordTime() { measurements->oracle_execution_time_ns+=measurement_ns(started); }
-        } record{measurements,started};
+        if (values.empty()) return std::vector<bool>{};
+        oracle_process::Invocation record(measurements->oracle_total_calls,
+            measurements->oracle_execution_time_ns,
+            measurements->oracle_candidates_submitted, values.size());
         auto result=oracle.accepts_batch(values);
         if (result.size()!=values.size()) throw std::runtime_error("oracle result count mismatch");
         return result;

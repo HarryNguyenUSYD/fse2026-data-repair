@@ -9,6 +9,7 @@ import os
 import platform
 import copy
 import re
+import shlex
 import signal
 import statistics
 import subprocess
@@ -64,7 +65,7 @@ RESULT_FIELDS = (
     "observed_edit_distance",
     "effective_seed",
     "total_execution_time_ns",
-    "rsr_execution_time_ns", "oracle_total_calls", "oracle_execution_time_ns",
+    "rsr_execution_time_ns", "oracle_total_calls", "oracle_candidates_submitted", "oracle_execution_time_ns",
     "edsm_execution_time_ns",
     "ngrams_execution_time_ns",
     "initial_state_merge_ns",
@@ -302,10 +303,8 @@ def _write_lines(path: Path, values: list[str]) -> None:
 
 
 def _legacy_validator_command(validator: Path) -> str:
-    if os.name == "nt":
-        return f'\\"{validator.resolve().as_posix()}\\"'
-    return f'"{validator.resolve()}"'
-
+    # betaMax splits this into argv; no shell is involved.
+    return shlex.quote(validator.resolve().as_posix())
 
 def _betamax_arguments(
     case: dict[str, Any], suite_config: dict[str, Any],
@@ -334,6 +333,24 @@ def _betamax_arguments(
     ]
 
 
+def _read_oracle_metrics(path: Path, cutoff_ns: int) -> dict[str, int]:
+    snapshot = json.loads(path.read_text(encoding="utf-8"))
+    fields = ("oracle_total_calls", "oracle_candidates_submitted",
+              "oracle_execution_time_ns", "active_started_unix_ns")
+    if not isinstance(snapshot, dict) or any(
+        type(snapshot.get(field)) is not int or snapshot[field] < 0 for field in fields
+    ):
+        raise ValueError("invalid persistent oracle metrics")
+    active_started = snapshot["active_started_unix_ns"]
+    return {
+        "oracle_total_calls": snapshot["oracle_total_calls"],
+        "oracle_candidates_submitted": snapshot["oracle_candidates_submitted"],
+        "oracle_execution_time_ns": snapshot["oracle_execution_time_ns"] + (
+            max(0, cutoff_ns - active_started) if active_started else 0
+        ),
+    }
+
+
 def _launch(
     arguments: list[str], working_directory: Path, timeout: float | None,
     stdout_path: Path | None = None,
@@ -342,6 +359,8 @@ def _launch(
         stdout_path.open("w", encoding="utf-8") if stdout_path is not None else None
     )
     try:
+        environment = dict(os.environ, ORACLE_METRICS_PATH=str(
+            (working_directory / "oracle-metrics.json").resolve()))
         process = subprocess.Popen(
             arguments,
             cwd=working_directory,
@@ -349,14 +368,27 @@ def _launch(
             stderr=subprocess.PIPE,
             text=True,
             start_new_session=(os.name == "posix"),
+            env=environment,
         )
         timed_out = False
         try:
             stdout, stderr = process.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
             timed_out = True
+            # Freeze the last atomic snapshot before terminating the process.
+            # Include an in-flight invocation only up to timeout detection.
+            recovered = None
+            cutoff_ns = time.time_ns()
+            try:
+                recovered = _read_oracle_metrics(
+                    working_directory / "oracle-metrics.json", cutoff_ns)
+            except (OSError, ValueError):
+                pass
             _kill_process_group(process)
             stdout, stderr = process.communicate()
+            if recovered is not None:
+                (working_directory / "oracle-timeout-metrics.json").write_text(
+                    json.dumps(recovered), encoding="utf-8")
     finally:
         if stdout_stream is not None:
             stdout_stream.close()
@@ -388,6 +420,7 @@ def execute_case(
     peak_memory: int | str = ""
     effective_seed: int | str = ""
     oracle_total_calls: int | str = ""
+    oracle_candidates_submitted: int | str = ""
     oracle_execution_time: int | str = ""
     rsr_execution_time: int | str = ""
     edsm_execution_time: int | str = ""
@@ -409,6 +442,10 @@ def execute_case(
     try:
         with tempfile.TemporaryDirectory(prefix=f"{implementation}-") as directory:
             working_directory = Path(directory)
+            (working_directory / "oracle-metrics.json").write_text(json.dumps({
+                "oracle_total_calls": 0, "oracle_candidates_submitted": 0,
+                "oracle_execution_time_ns": 0, "active_started_unix_ns": 0,
+            }), encoding="utf-8")
             if implementation == "patchouli":
                 if n is None:
                     raise ValueError("patchouli requires n")
@@ -445,9 +482,7 @@ def execute_case(
                     stream.write(case["corrupt_string"])
                 arguments = [
                     str(EXECUTABLES["erepair"].resolve()),
-                    _legacy_validator_command(
-                        BOUNDARY_VALIDATORS[case["format"]]
-                    ),
+                    str(BOUNDARY_VALIDATORS[case["format"]].resolve()),
                     str(broken),
                     str(repaired),
                 ]
@@ -461,6 +496,16 @@ def execute_case(
                     if implementation == "erepair" else None
                 ),
             )
+            if timed_out:
+                frozen = working_directory / "oracle-timeout-metrics.json"
+                if frozen.is_file():
+                    recovered = json.loads(frozen.read_text(encoding="utf-8"))
+                else:
+                    recovered = _read_oracle_metrics(
+                        working_directory / "oracle-metrics.json", time.time_ns())
+                oracle_total_calls = recovered["oracle_total_calls"]
+                oracle_candidates_submitted = recovered["oracle_candidates_submitted"]
+                oracle_execution_time = recovered["oracle_execution_time_ns"]
             if implementation == "erepair" and repaired.is_file():
                 with repaired.open("r", encoding="ascii", newline="") as stream:
                     file_output = stream.read()
@@ -474,7 +519,7 @@ def execute_case(
             required = {
                 "output_string", "effective_seed", "peak_memory_bytes",
                 "total_execution_time_ns", "rsr_execution_time_ns",
-                "oracle_total_calls", "oracle_execution_time_ns",
+                "oracle_total_calls", "oracle_candidates_submitted", "oracle_execution_time_ns",
                 "edsm_execution_time_ns",
                 "ngrams_execution_time_ns", "initial_state_merge_ns",
                 "merge_replay_ns", "resumed_state_merge_ns",
@@ -495,7 +540,7 @@ def execute_case(
             if not isinstance(parsed["effective_seed"], int):
                 raise ValueError("patchouli effective_seed is not an integer")
             for field in (
-                "rsr_execution_time_ns", "oracle_total_calls", "oracle_execution_time_ns",
+                "rsr_execution_time_ns", "oracle_total_calls", "oracle_candidates_submitted", "oracle_execution_time_ns",
                 "edsm_execution_time_ns", "ngrams_execution_time_ns",
                 "initial_state_merge_ns", "merge_replay_ns",
                 "resumed_state_merge_ns", "candidate_copy_or_rollback_ns",
@@ -549,6 +594,7 @@ def execute_case(
             execution_time = parsed["total_execution_time_ns"]
             peak_memory = parsed["peak_memory_bytes"]
             oracle_total_calls = parsed["oracle_total_calls"]
+            oracle_candidates_submitted = parsed["oracle_candidates_submitted"]
             oracle_execution_time = parsed["oracle_execution_time_ns"]
             rsr_execution_time = parsed["rsr_execution_time_ns"]
             edsm_execution_time = parsed["edsm_execution_time_ns"]
@@ -576,25 +622,27 @@ def execute_case(
             if "\n" in output or "\r" in output:
                 raise ValueError("betaMax emitted more than one stdout line")
             metrics = re.search(
-                r"ORACLE_METRICS total_calls=(\d+) execution_time_ns=(\d+)",
+                r"ORACLE_METRICS total_calls=(\d+) execution_time_ns=(\d+) candidates_submitted=(\d+)",
                 stderr,
             )
             if metrics is None:
                 raise ValueError("betaMax did not report oracle metrics")
             oracle_total_calls = int(metrics.group(1))
             oracle_execution_time = int(metrics.group(2))
+            oracle_candidates_submitted = int(metrics.group(3))
         elif implementation == "erepair":
             if file_output is None:
                 raise ValueError("eRepair did not produce an output file")
             output = file_output
             metrics = re.search(
-                r"ORACLE_METRICS total_calls=(\d+) execution_time_ns=(\d+)",
+                r"ORACLE_METRICS total_calls=(\d+) execution_time_ns=(\d+) candidates_submitted=(\d+)",
                 stdout,
             )
             if metrics is None:
                 raise ValueError("eRepair did not report oracle metrics")
             oracle_total_calls = int(metrics.group(1))
             oracle_execution_time = int(metrics.group(2))
+            oracle_candidates_submitted = int(metrics.group(3))
             total_iterations = oracle_total_calls
     except Exception as exception:
         error = f"{type(exception).__name__}: {exception}"
@@ -632,6 +680,7 @@ def execute_case(
         "effective_seed": effective_seed,
         "total_execution_time_ns": execution_time,
         "oracle_total_calls": oracle_total_calls,
+        "oracle_candidates_submitted": oracle_candidates_submitted,
         "oracle_execution_time_ns": oracle_execution_time,
         "rsr_execution_time_ns": rsr_execution_time,
         "edsm_execution_time_ns": edsm_execution_time,
@@ -744,6 +793,11 @@ def _summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
         for row in observed
         if row["oracle_total_calls"] != ""
     ]
+    oracle_candidate_samples = [
+        int(row["oracle_candidates_submitted"])
+        for row in observed
+        if row["oracle_candidates_submitted"] != ""
+    ]
     median_edit_distance = (
         statistics.median(edit_distances) if edit_distances else None
     )
@@ -764,11 +818,32 @@ def _summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "timeouts": sum(int(row["timed_out"]) for row in rows),
         "errors": sum(bool(row["error"]) for row in rows),
         "measurement_scope": "successful non-error cases only",
+        "timeout_case_oracle_metrics": {
+            "scope": "calls started and elapsed oracle wall time up to timeout detection",
+            "cases_with_metrics": sum(
+                bool(row["timed_out"]) and row["oracle_total_calls"] != "" for row in rows
+            ),
+            "total_calls": sum(
+                int(row["oracle_total_calls"]) for row in rows
+                if row["timed_out"] and row["oracle_total_calls"] != ""
+            ),
+            "candidates_submitted": sum(
+                int(row["oracle_candidates_submitted"]) for row in rows
+                if row["timed_out"] and row["oracle_candidates_submitted"] != ""
+            ),
+            "execution_time_ns": sum(
+                int(row["oracle_execution_time_ns"]) for row in rows
+                if row["timed_out"] and row["oracle_execution_time_ns"] != ""
+            ),
+        },
         "successful_case_total_iterations": (
             sum(iteration_samples) if iteration_samples else None
         ),
         "successful_case_total_oracle_calls": (
             sum(oracle_call_samples) if oracle_call_samples else None
+        ),
+        "successful_case_total_oracle_candidates_submitted": (
+            sum(oracle_candidate_samples) if oracle_candidate_samples else None
         ),
         "successful_case_subalgorithm_total_time_ns": measurement_totals,
         "outputs_in_positive_examples": sum(

@@ -301,6 +301,7 @@ int main() {
     assert(first_accepted!="ac");
     assert(waiting.calls==2);
     assert(waiting_measurements.oracle_total_calls==2);
+    assert(waiting_measurements.oracle_candidates_submitted==1+waiting.last_batch.size());
     assert(waiting_measurements.oracle_execution_time_ns>=20000000);
     WaitingOracle initial_accept;
     initial_accept.calls=1;
@@ -308,6 +309,7 @@ int main() {
     assert(patchouli::patchouli(InputData{{"ab"},{},"ac"},config,initial_accept,
                                &initial_measurements)=="ac");
     assert(initial_measurements.oracle_total_calls==1);
+    assert(initial_measurements.oracle_candidates_submitted==1);
     assert(initial_measurements.oracle_execution_time_ns>=10000000);
     assert(initial_measurements.total_iterations==0);
     assert(measurements.edsm_execution_time_ns==
@@ -319,6 +321,7 @@ int main() {
     assert(measured_json.at("total_iterations")==measurements.total_iterations);
     assert(measured_json.contains("rsr_execution_time_ns"));
     assert(measured_json.at("oracle_total_calls")==measurements.oracle_total_calls);
+    assert(measured_json.at("oracle_candidates_submitted")==measurements.oracle_candidates_submitted);
     assert(measured_json.at("oracle_execution_time_ns")==measurements.oracle_execution_time_ns);
     assert(!measured_json.contains("ktails_execution_time_ns"));
     assert(measured_json.contains("initial_state_merge_ns"));

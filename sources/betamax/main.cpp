@@ -1,3 +1,4 @@
+#include "oracle_process.hpp"
 #include <algorithm>
 #include <cerrno>
 #include <chrono>
@@ -1024,136 +1025,39 @@ struct Oracle {
     uint64_t incomplete = 0;
     double seconds_total = 0.0;
     uint64_t execution_time_ns = 0;
+    uint64_t candidates_submitted = 0;
   };
   mutable Stats stats;
 
   std::vector<std::string> default_cmd_argv(const fs::path& temp_path) const {
     std::string base = category_to_base(category);
-    fs::path validator = repo_root / "validators" / ("validate_" + base);
+    fs::path validator = repo_root / "build" / ("validate_betamax_" + base
+#if defined(_WIN32)
+        + ".exe"
+#endif
+    );
     if (fs::exists(validator)) return {validator.string(), temp_path.string()};
     throw std::runtime_error(
         "native C++ oracle not found: " + validator.string() + ". Run `make` first.");
   }
 
   bool validate_text(std::string_view text) const {
-    const auto t0 = std::chrono::steady_clock::now();
-    auto record = [&](bool ok, bool incomplete, const char* why) -> bool {
-      stats.total++;
-      if (incomplete) {
-        stats.incomplete++;
-      } else if (ok) {
-        stats.correct++;
-      } else {
-        stats.incorrect++;
-      }
-      const auto t1 = std::chrono::steady_clock::now();
-      stats.seconds_total += std::chrono::duration<double>(t1 - t0).count();
-      stats.execution_time_ns += static_cast<uint64_t>(
-          std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
-      if (verbose) {
-        std::cerr << "[DEBUG] Membership verdict: "
-                  << (incomplete ? "INCOMPLETE" : (ok ? "ACCEPT" : "REJECT")) << " for '"
-                  << preview_for_log(text) << "'";
-        if (why && *why) std::cerr << " (" << why << ")";
-        std::cerr << "\n";
-      }
-      return ok;
-    };
-
-    // temp file
-    fs::path dir = fs::temp_directory_path();
-    std::string tmpl = (dir / "betamax_cpp_XXXXXX.txt").string();
-    std::vector<char> buf(tmpl.begin(), tmpl.end());
-    buf.push_back('\0');
-
-#if defined(_WIN32)
-    // Simple fallback: write to temp name and run via system (no timeout).
-    char tmpname[L_tmpnam];
-    std::tmpnam(tmpname);
-    fs::path temp_path = dir / tmpname;
-    {
-      std::ofstream out(temp_path, std::ios::binary);
-      out.write(text.data(), (std::streamsize)text.size());
-    }
-    std::vector<std::string> argv = override_cmd ? *override_cmd : default_cmd_argv(temp_path);
-    if (override_cmd) argv.push_back(temp_path.string());
-    std::string cmdline;
-    for (const auto& s : argv) {
-      if (!cmdline.empty()) cmdline.push_back(' ');
-      cmdline += s;
-    }
-    int rc = std::system(cmdline.c_str());
-    std::error_code ec;
-    fs::remove(temp_path, ec);
-    return record(rc == 0, false, "system");
-#else
-    int fd = ::mkstemps(buf.data(), 4);  // ".txt"
-    if (fd < 0) return record(false, true, "mkstemps");
-    fs::path temp_path(buf.data());
-    // Write content.
-    ssize_t w = ::write(fd, text.data(), text.size());
-    (void)w;
-    ::close(fd);
-
-    std::vector<std::string> argv = override_cmd ? *override_cmd : default_cmd_argv(temp_path);
-    if (override_cmd) argv.push_back(temp_path.string());
-
-    if (debug) {
-      std::cerr << "[DEBUG] Oracle in: len=" << text.size() << "\n";
-      std::cerr << "[DEBUG] Oracle cmd:";
-      for (const auto& s : argv) std::cerr << " " << s;
-      std::cerr << "\n";
-    }
-
-    std::vector<char*> cargv;
-    cargv.reserve(argv.size() + 1);
-    for (auto& s : argv) cargv.push_back(const_cast<char*>(s.c_str()));
-    cargv.push_back(nullptr);
-
-    pid_t pid = 0;
-    int spawn_rc = ::posix_spawnp(&pid, cargv[0], nullptr, nullptr, cargv.data(), environ);
-    if (spawn_rc != 0) {
-      if (debug) std::cerr << "[WARN] posix_spawnp failed: " << std::strerror(spawn_rc) << "\n";
-      std::error_code ec;
-      fs::remove(temp_path, ec);
-      return record(false, true, "posix_spawnp");
-    }
-
-    auto start = std::chrono::steady_clock::now();
-    int status = 0;
-    while (true) {
-      pid_t r = ::waitpid(pid, &status, WNOHANG);
-      if (r == pid) break;
-      if (r == 0) {
-        auto now = std::chrono::steady_clock::now();
-        auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - start).count();
-        if (timeout_ms >= 0 && elapsed_ms > timeout_ms) {
-          if (debug) std::cerr << "[WARN] Oracle timed out after " << timeout_ms << "ms; killing.\n";
-          ::kill(pid, SIGKILL);
-          (void)::waitpid(pid, &status, 0);
-          std::error_code ec;
-          fs::remove(temp_path, ec);
-          return record(false, true, "timeout");
-        }
-        ::usleep(2000);
-        continue;
-      }
-      // waitpid error
-      if (debug) std::cerr << "[WARN] waitpid error: " << std::strerror(errno) << "\n";
-      break;
-    }
-
-    std::error_code ec;
-    fs::remove(temp_path, ec);
-
-    if (WIFEXITED(status)) {
-      int rc = WEXITSTATUS(status);
-      if (debug) std::cerr << "[DEBUG] Oracle rc: " << rc << "\n";
-      return record(rc == 0, false, "exit");
-    }
-    if (debug) std::cerr << "[DEBUG] Oracle terminated abnormally\n";
-    return record(false, true, "abnormal");
-#endif
+    oracle_process::Invocation measurement(stats.total, stats.execution_time_ns,
+                                           stats.candidates_submitted, 1);
+    oracle_process::TemporaryDirectory files;
+    const auto temp_path = files.file("candidate");
+    oracle_process::write_file(temp_path, text);
+    auto command = override_cmd ? *override_cmd : default_cmd_argv(temp_path);
+    if (override_cmd) command.push_back(temp_path.string());
+    const auto result = oracle_process::run(command, {}, timeout_ms);
+    oracle_process::require_exit_code(result, {0, 1});
+    const bool accepted = result.exit_code == 0;
+    if (accepted) ++stats.correct;
+    else ++stats.incorrect;
+    if (verbose) std::cerr << "[DEBUG] Membership verdict: "
+                           << (accepted ? "ACCEPT" : "REJECT") << " for '"
+                           << preview_for_log(text) << "'\n";
+    return accepted;
   }
 };
 
@@ -1470,7 +1374,8 @@ static std::optional<std::string> sample_accepted_string(
 }
 
 int main(int argc, char** argv) {
-  try {
+    try {
+    oracle_process::persist_metrics(0, 0, 0, 0);
     auto parsed = parse_args(argc, argv);
     if (!parsed) return 0;
     Options opt = *parsed;
@@ -1506,7 +1411,7 @@ int main(int argc, char** argv) {
       ~OracleStatsReporter() {
         const auto& s = oracle.stats;
         std::cerr << "ORACLE_METRICS total_calls=" << s.total
-                  << " execution_time_ns=" << s.execution_time_ns << "\n";
+                  << " execution_time_ns=" << s.execution_time_ns << " candidates_submitted=" << s.candidates_submitted << "\n";
       }
     } oracle_stats_reporter{oracle};
 

@@ -1,3 +1,4 @@
+#include "oracle_process.hpp"
 #include <algorithm>
 #include <iostream>
 #include <queue>
@@ -13,16 +14,15 @@
 #include <random>
 #include <stdexcept>
 
-#include <unistd.h>    // for close(), getpid()
-#include <fcntl.h>     // for mkstemp
-#include <stdio.h>     // for mkstemp
-#include <sys/wait.h>  // for WIFEXITED, WEXITSTATUS
+#include <cstdio>
 
 int interations = 0;
 int success = 0;
 int failure = 0;
 int incomplete = 0;
 std::uint64_t oracle_execution_time_ns = 0;
+std::uint64_t oracle_total_calls = 0;
+std::uint64_t oracle_candidates_submitted = 0;
 
 //-------------------------------------
 // 0. CharacterSet
@@ -67,82 +67,22 @@ public:
 //-------------------------------------
 enum class ParseResult { INCOMPLETE, CORRECT, INCORRECT };
 
-//-------------------------------------
-// Generate a unique temporary filename and create the file
-// Using mkstemp() ensures there is no conflict with existing files
-//-------------------------------------
-std::string generateTempFile()
-{
-    // "XXXXXX" will be replaced by mkstemp() with a unique string
-    char pattern[] = "/tmp/parser_inputXXXXXX";
-    int fd = mkstemp(pattern);
-    if (fd == -1) {
-        throw std::runtime_error("Failed to create temp file");
-    }
-    // We only create the file here and get the filename, then close the fd
-    close(fd);
-    return std::string(pattern);
-}
-
-//-------------------------------------
-// 2. External parser returning ParseResult
-//    Uses a unique temporary file name to avoid concurrency conflicts
-//-------------------------------------
 std::function<ParseResult(const std::string&)> createParser(const std::string& parser_path) {
     return [parser_path](const std::string& input) -> ParseResult {
-        // Generate a unique temporary file
-        std::string temp_file;
-        try {
-            temp_file = generateTempFile();
-        } catch (const std::exception& e) {
-            std::cerr << "Error: " << e.what() << "\n";
-            return ParseResult::INCORRECT;
-        }
-
-        // Write the input to the temporary file
-        {
-            std::ofstream temp_out(temp_file);
-            if (!temp_out.is_open()) {
-                std::cerr << "Error: Could not create temporary file." << std::endl;
-                return ParseResult::INCORRECT;
-            }
-            temp_out << input;
-        }
-        interations++;
-        // Call the external parser
-        // parser_path + " " + temp_file + " > /dev/null 2>&1"
-        std::string command = parser_path + " " + temp_file + " > /dev/null 2>&1";
-        const auto oracle_started = std::chrono::steady_clock::now();
-        int status = system(command.c_str());
-        oracle_execution_time_ns += static_cast<std::uint64_t>(
-            std::chrono::duration_cast<std::chrono::nanoseconds>(
-                std::chrono::steady_clock::now() - oracle_started).count());
-
-        ParseResult result = ParseResult::INCORRECT;
-        if (WIFEXITED(status)) {
-            int exit_code = WEXITSTATUS(status);
-            if (exit_code == 0) {
-                result = ParseResult::CORRECT;
-                success++;
-            } else if (exit_code == 1) {
-                result = ParseResult::INCORRECT;
-                failure++;
-            } else if (exit_code == 255) {
-                result = ParseResult::INCOMPLETE;
-                incomplete++;
-            } else {
-                failure++;
-                // Handle more exit codes if needed
-                result = ParseResult::INCORRECT;
-            }
-        }
-
-        // Remove the temporary file when done to avoid leftovers
-        std::remove(temp_file.c_str());
-        return result;
+        oracle_process::Invocation measurement(oracle_total_calls, oracle_execution_time_ns,
+                                               oracle_candidates_submitted, 1);
+        oracle_process::TemporaryDirectory files;
+        const auto candidate = files.file("candidate");
+        oracle_process::write_file(candidate, input);
+        const auto result = oracle_process::run({parser_path, candidate.string()});
+        oracle_process::require_exit_code(result, {0, 1, 255});
+        ++interations;
+        if (result.exit_code == 0) { ++success; return ParseResult::CORRECT; }
+        if (result.exit_code == 255) { ++incomplete; return ParseResult::INCOMPLETE; }
+        ++failure;
+        return ParseResult::INCORRECT;
     };
 }
-
 //-------------------------------------
 // 3. BSearch function
 //-------------------------------------
@@ -279,6 +219,8 @@ std::string DRepair(const std::string& input,
 // 5. Main function
 //-------------------------------------
 int main(int argc, char* argv[]) {
+    try {
+    oracle_process::persist_metrics(0, 0, 0, 0);
     if (argc < 4) {
         std::cerr << "Usage: " << argv[0] << " <parser_path> <input_file> <output_file>\n";
         return 1;
@@ -317,6 +259,11 @@ int main(int argc, char* argv[]) {
         std::cout << "No valid repair found." << std::endl;
     }
     printf("*** Number of required oracle runs: %d correct: %d incorrect: %d incomplete: %d ***\n", interations, success, failure, incomplete);
-    std::cout << "ORACLE_METRICS total_calls=" << interations
-              << " execution_time_ns=" << oracle_execution_time_ns << "\n";
+    std::cout << "ORACLE_METRICS total_calls=" << oracle_total_calls
+              << " execution_time_ns=" << oracle_execution_time_ns << " candidates_submitted=" << oracle_candidates_submitted << "\n";
+    return 0;
+    } catch (const std::exception& error) {
+        std::cerr << "erepair: " << error.what() << '\n';
+        return 1;
+    }
 }
