@@ -25,7 +25,9 @@ inline std::string patchouli(const InputData& input,const Config& config,Oracle&
             measurements->oracle_execution_time_ns,
             measurements->oracle_candidates_submitted, values.size());
         auto result=oracle.accepts_batch(values);
-        if (result.size()!=values.size()) throw std::runtime_error("oracle result count mismatch");
+        if (result.empty() || result.size()>values.size() ||
+            (result.size()<values.size() && !result.back()))
+            throw std::runtime_error("oracle result is not a valid boolean prefix");
         return result;
     };
     if (oracle_accepts({input.corrupt_string}).front()) return input.corrupt_string;
@@ -95,7 +97,7 @@ inline std::string patchouli(const InputData& input,const Config& config,Oracle&
         if (candidates.empty())
             throw std::runtime_error("RSR produced no queryable repair candidates");
         const auto accepted=oracle_accepts(candidates);
-        for (std::size_t i=0;i<candidates.size();++i)
+        for (std::size_t i=0;i<accepted.size();++i)
             if (accepted[i]) return candidates[i];
         known.insert(candidates.begin(),candidates.end());
     }

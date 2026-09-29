@@ -22,13 +22,15 @@ public:
             nlohmann::json(values).dump());
         oracle_process::require_exit_code(response, {0});
         const auto result = nlohmann::json::parse(response.output);
-        if (!result.is_array() || result.size() != values.size())
-            throw std::runtime_error("oracle result count mismatch: expected boolean array");
+        if (!result.is_array() || result.empty() || result.size() > values.size())
+            throw std::runtime_error("oracle result count mismatch: expected a non-empty boolean prefix");
         std::vector<bool> accepted;
         for (const auto& item : result) {
             if (!item.is_boolean()) throw std::runtime_error("oracle result is not boolean");
             accepted.push_back(item.get<bool>());
         }
+        if (accepted.size() < values.size() && !accepted.back())
+            throw std::runtime_error("oracle stopped before accepting a candidate");
         return accepted;
     }
 private:

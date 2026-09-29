@@ -248,6 +248,19 @@ def _kill_process_group(process: subprocess.Popen[str]) -> None:
             return
         except ProcessLookupError:
             return
+    if os.name == "nt":
+        try:
+            killed = subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            if killed.returncode == 0 or process.poll() is not None:
+                return
+        except OSError:
+            pass
     process.kill()
 
 

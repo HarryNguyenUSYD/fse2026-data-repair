@@ -10,6 +10,7 @@
 #endif
 #include <cassert>
 #include <iostream>
+#include <iterator>
 #include <limits>
 #include <thread>
 
@@ -17,7 +18,7 @@ using namespace patchouli;
 class SetOracle final : public Oracle {
 public:
     explicit SetOracle(std::set<std::string> accepted) : accepted_(std::move(accepted)) {}
-    std::vector<bool> accepts_batch(const std::vector<std::string>& values) override { batches.push_back(values); std::vector<bool> result; for (const auto& text:values) { calls.push_back(text); result.push_back(accepted_.contains(text)); } return result; }
+    std::vector<bool> accepts_batch(const std::vector<std::string>& values) override { batches.push_back(values); std::vector<bool> result; for (const auto& text:values) { calls.push_back(text); const bool accepted=accepted_.contains(text); result.push_back(accepted); if (accepted) break; } return result; }
     std::vector<std::vector<std::string>> batches;
     std::vector<std::string> calls;
 private:
@@ -347,6 +348,18 @@ int main() {
     std::set<std::string> queried;
     for (const auto& batch:rejecting.batches)
         for (const auto& value:batch) assert(queried.insert(value).second);
+    SetOracle early_accept({"ab"});
+    auto early_config=config;
+    early_config.n=0;
+    assert(patchouli::patchouli(InputData{{"aa","ab","ac"},{},"az"},
+                               early_config,early_accept)=="ab");
+    const auto& early_batch=early_accept.batches.at(1);
+    const auto accepted_position=std::find(early_batch.begin(),early_batch.end(),"ab");
+    assert(accepted_position!=early_batch.end());
+    assert(std::next(accepted_position)!=early_batch.end());
+    assert(early_accept.calls.size()==
+           1+static_cast<std::size_t>(std::distance(early_batch.begin(),accepted_position))+1);
+    assert(early_accept.calls.back()=="ab");
     SetOracle known_negative({"ab"});
     assert(patchouli::patchouli(InputData{{"ab"},{"aa"},"ac"},config,known_negative)=="ab");
     assert(std::find(known_negative.calls.begin(),known_negative.calls.end(),"aa")==known_negative.calls.end());

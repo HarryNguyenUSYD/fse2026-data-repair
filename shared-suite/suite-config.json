@@ -37,7 +37,12 @@
   "case_timeout_seconds": 300,
   "patchouli": {
     "n_values": [
-      2
+      0,
+      1,
+      2,
+      3,
+      4,
+      5
     ],
     "max_candidate_length": -1,
     "max_iterations": -1,
@@ -45,18 +50,7 @@
     "max_queue_size": -1,
     "max_rsr_candidates": -1,
     "ngrams_batch_sizes": [
-      1,
-      2,
-      4,
-      8,
-      16,
-      24,
-      32,
-      40,
-      48,
-      56,
-      64,
-      -1
+      1
     ]
   },
   "betamax": {

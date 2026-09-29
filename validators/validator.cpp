@@ -110,7 +110,9 @@ int main(int argc, char** argv) {
     for (const auto& item : values) {
         if (!item.is_string()) throw std::runtime_error("expected string array entries");
         const auto& value = item.get_ref<const std::string&>();
-        result.push_back(accepts(value));
+        const bool accepted = accepts(value);
+        result.push_back(accepted);
+        if (accepted) break;
     }
     std::cout << result.dump() << '\n';
     return std::cout ? 0 : 2;
