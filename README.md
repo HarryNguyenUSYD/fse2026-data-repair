@@ -31,6 +31,32 @@ make test-betamax
 make test-erepair
 ```
 
+### Choose the Patchouli sweep
+
+Before running `make test`, edit these two arrays under `patchouli` in
+`shared-suite/suite-config.json`.
+
+For `multi-batch-size-results`, keep `n` fixed at 2 and vary the batch size:
+
+```json
+"n_values": [3],
+"ngrams_batch_sizes": [1, 2, 4, 8, 16, 24, 32, 40, 48, 56, 64, -1]
+```
+
+For `multi-n-results`, vary `n` and keep the batch size fixed at 1:
+
+```json
+"n_values": [0, 1, 2, 3, 4, 5],
+"ngrams_batch_sizes": [1]
+```
+
+(the test suite uses `multi-n-results` by default)
+
+Then run `make test`. The runner writes `results/benchmark.csv` and
+`results/benchmark-summary.json`; copy that directory to
+`final-fse-results/multi-batch-size-results/` or
+`final-fse-results/multi-n-results/` to archive the selected sweep.
+
 Use `make clean` to remove generated binaries and results. The bundled cases are
 ready to use; `make generate` replaces them from `shared-suite/suite-config.json`.
 

@@ -18,6 +18,7 @@ EREPAIR := $(BUILD_DIR)/erepair$(EXE_SUFFIX)
 VALIDATORS := $(addprefix $(BUILD_DIR)/validate_,$(addsuffix $(EXE_SUFFIX),$(FORMATS)))
 FILE_VALIDATORS := $(addprefix $(BUILD_DIR)/validate_betamax_,$(addsuffix $(EXE_SUFFIX),$(FORMATS)))
 BOUNDARY_VALIDATORS := $(addprefix $(BUILD_DIR)/boundary_validate_,$(addsuffix $(EXE_SUFFIX),$(FORMATS)))
+TEST_CASES := shared-suite/test-cases/test-cases.json
 COMMON_HEADER := sources/common/oracle_process.hpp
 HEADERS := $(COMMON_HEADER) $(wildcard $(PATCHOULI_DIR)/include/patchouli/*.hpp) $(PATCHOULI_DIR)/third_party/nlohmann/json.hpp
 CPPFLAGS := -Isources/common -I$(PATCHOULI_DIR)/include -I$(PATCHOULI_DIR)/third_party
@@ -59,28 +60,31 @@ $(BUILD_DIR)/patchouli_tests$(EXE_SUFFIX): $(PATCHOULI_DIR)/tests/patchouli_test
 generate:
 	$(PYTHON) shared-suite/generate_cases.py
 
-smoke: patchouli betamax erepair
+$(TEST_CASES): shared-suite/suite-config.json shared-suite/generate_cases.py
+	$(PYTHON) shared-suite/generate_cases.py
+
+smoke: patchouli betamax erepair $(TEST_CASES)
 	$(PYTHON) run_smoke_tests.py
 
-smoke-patchouli: patchouli
+smoke-patchouli: patchouli $(TEST_CASES)
 	$(PYTHON) run_patchouli.py --smoke
 
-smoke-betamax: betamax
+smoke-betamax: betamax $(TEST_CASES)
 	$(PYTHON) run_betamax.py --smoke
 
-smoke-erepair: erepair
+smoke-erepair: erepair $(TEST_CASES)
 	$(PYTHON) run_erepair.py --smoke
 
-test: patchouli betamax erepair
+test: patchouli betamax erepair $(TEST_CASES)
 	$(PYTHON) run_tests.py
 
-test-patchouli: patchouli
+test-patchouli: patchouli $(TEST_CASES)
 	$(PYTHON) run_patchouli.py
 
-test-betamax: betamax
+test-betamax: betamax $(TEST_CASES)
 	$(PYTHON) run_betamax.py
 
-test-erepair: erepair
+test-erepair: erepair $(TEST_CASES)
 	$(PYTHON) run_erepair.py
 
 check: $(BUILD_DIR)/patchouli_tests$(EXE_SUFFIX)
